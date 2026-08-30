@@ -44,6 +44,16 @@ class GenerateRequest(BaseModel):
     # Git deployment
     branch: Optional[str] = None
     repo: Optional[str] = None
+    git_repo: Optional[str] = None
+    github_repo: Optional[str] = None
+    org: Optional[str] = None
+    git_org: Optional[str] = None
+    github_org: Optional[str] = None
+    token: Optional[str] = None
+    git_token: Optional[str] = None
+    git_pat: Optional[str] = None
+    github_pat: Optional[str] = None
+    pat: Optional[str] = None
     commit_message: Optional[str] = None
     department_repo: Optional[str] = None
 
@@ -73,8 +83,23 @@ class GenerateRequest(BaseModel):
 
             # Normalize fabric_group_id -> workspace_id
             fg_id = data.get("fabric_group_id")
-            if fg_id and not fg_id.startswith("{{") and fg_id.strip():
-                data["workspace_id"] = fg_id.strip()
+            if fg_id and not str(fg_id).startswith("{{") and str(fg_id).strip():
+                data["workspace_id"] = str(fg_id).strip()
+
+            # Normalize git token / pat
+            tok = data.get("git_pat") or data.get("github_pat") or data.get("git_token") or data.get("token") or data.get("pat")
+            if tok and not str(tok).startswith("{{") and str(tok).strip():
+                data["git_pat"] = str(tok).strip()
+                data["token"] = str(tok).strip()
+
+            # Normalize git repo / org
+            r = data.get("repo") or data.get("git_repo") or data.get("github_repo")
+            if r and not str(r).startswith("{{") and str(r).strip():
+                data["repo"] = str(r).strip()
+
+            o = data.get("org") or data.get("git_org") or data.get("github_org")
+            if o and not str(o).startswith("{{") and str(o).strip():
+                data["org"] = str(o).strip()
 
             # Default push_only for cloud deployments
             if data.get("deploy") in ("fabric", "github", "devops") and "push_only" not in data:

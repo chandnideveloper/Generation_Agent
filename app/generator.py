@@ -168,8 +168,13 @@ def _deploy(
             )
         if request.deploy == Deploy.GITHUB:
             return github_deployer.deploy(
-                package, prefix, request.branch, request.commit_message,
-                repo=request.repo,
+                package=package,
+                prefix=prefix,
+                branch=request.branch,
+                message=request.commit_message,
+                token=request.git_pat or request.token or request.github_pat or request.pat,
+                org=request.org or request.git_org or request.github_org,
+                repo=request.repo or request.git_repo or request.github_repo,
             )
         if request.deploy == Deploy.DEVOPS:
             return devops_deployer.deploy(

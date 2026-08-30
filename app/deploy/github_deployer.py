@@ -5,7 +5,7 @@ lands atomically. The contents API would need one request per file and would
 leave a half-written tree if it failed midway.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -34,15 +34,14 @@ def _check(response: requests.Response, action: str) -> Dict[str, Any]:
 
 
 def _stale_deletions(
-    base: str, headers: Dict[str, str], base_tree: str, prefix: str, new_paths: set
+    base: str, headers: Dict[str, str], base_tree: str, prefix: str, new_paths: set, session: Optional[requests.Session] = None
 ) -> List[Dict[str, Any]]:
     """Deletion entries (sha: None) for every blob under `prefix` in
-    `base_tree` that isn't in `new_paths` - without these, files removed
-    from the package (a dropped table, a renamed measure file) would
-    accumulate forever instead of the folder truly mirroring this run."""
-    response = requests.get(
+    `base_tree` that isn't in `new_paths`."""
+    client = session or requests
+    response = client.get(
         f"{base}/git/trees/{base_tree}", params={"recursive": "1"},
-        headers=headers, timeout=60,
+        timeout=60,
     )
     if response.status_code >= 300:
         logger.warning("Could not read existing tree for stale-file cleanup: %s", response.status_code)
@@ -59,6 +58,52 @@ def _stale_deletions(
     return deletions
 
 
+import concurrent.futures
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+def _get_session(token: str) -> requests.Session:
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=25, pool_maxsize=25)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    return session
+
+
+def _parse_github_repo(repo_input: Optional[str], org_input: Optional[str]) -> Tuple[str, str]:
+    """Parse org and repo name from URL, owner/repo string, or bare name."""
+    repo = (repo_input or "").strip()
+    org = (org_input or "").strip()
+
+    if repo.startswith("http://") or repo.startswith("https://") or repo.startswith("git@"):
+        clean = repo.rstrip("/").removesuffix(".git")
+        if "github.com/" in clean:
+            parts = clean.split("github.com/", 1)[1].split("/")
+            if len(parts) >= 2:
+                return parts[0], parts[1]
+        elif "github.com:" in clean:
+            parts = clean.split("github.com:", 1)[1].split("/")
+            if len(parts) >= 2:
+                return parts[0], parts[1]
+    elif "/" in repo:
+        parts = repo.split("/", 1)
+        return parts[0].strip(), parts[1].strip()
+
+    return org or config.GITHUB_ORG, repo or config.GITHUB_REPO
+
+
 def deploy(
     package: Dict[str, str],
     prefix: str,
@@ -68,10 +113,9 @@ def deploy(
     org: Optional[str] = None,
     repo: Optional[str] = None,
 ) -> Dict[str, Any]:
+    org, repo = _parse_github_repo(repo, org)
     token = token or config.GITHUB_PAT
-    org = org or config.GITHUB_ORG
-    repo = repo or config.GITHUB_REPO
-    branch = branch or config.BRANCH
+    branch = branch or config.BRANCH or "main"
 
     if not all([token, org, repo]):
         raise GitHubError(
@@ -79,19 +123,19 @@ def deploy(
         )
 
     base = f"{config.GITHUB_API}/repos/{org}/{repo}"
-    headers = _headers(token)
+    session = _get_session(token)
 
     # 1. Resolve the branch head, falling back to the default branch or empty repo.
-    ref = requests.get(f"{base}/git/ref/heads/{branch}", headers=headers, timeout=60)
+    ref = session.get(f"{base}/git/ref/heads/{branch}", timeout=60)
     head_sha = None
     base_tree = None
     create_branch = False
 
     if ref.status_code == 404:
-        repo_info = _check(requests.get(base, headers=headers, timeout=60), "read repo")
+        repo_info = _check(session.get(base, timeout=60), "read repo")
         default_branch = repo_info.get("default_branch", "main")
-        ref_default = requests.get(
-            f"{base}/git/ref/heads/{default_branch}", headers=headers, timeout=60
+        ref_default = session.get(
+            f"{base}/git/ref/heads/{default_branch}", timeout=60
         )
         if ref_default.status_code == 200:
             head_sha = ref_default.json().get("object", {}).get("sha")
@@ -105,40 +149,43 @@ def deploy(
 
     if head_sha:
         commit = _check(
-            requests.get(f"{base}/git/commits/{head_sha}", headers=headers, timeout=60),
+            session.get(f"{base}/git/commits/{head_sha}", timeout=60),
             "read commit",
         )
         base_tree = commit.get("tree", {}).get("sha")
 
-    # 2. One blob per file.
+    # 2. Upload blobs concurrently using ThreadPoolExecutor
     tree_entries: List[Dict[str, Any]] = []
     new_paths: set = set()
-    for path, content in sorted(package.items()):
-        blob = _check(
-            requests.post(
-                f"{base}/git/blobs", headers=headers,
-                json={"content": content, "encoding": "utf-8"}, timeout=120,
-            ),
-            f"create blob {path}",
+
+    def _upload_blob(item: Tuple[str, str]) -> Tuple[str, str, str]:
+        path, content = item
+        blob_resp = session.post(
+            f"{base}/git/blobs",
+            json={"content": content, "encoding": "utf-8"},
+            timeout=120,
         )
+        blob_data = _check(blob_resp, f"create blob {path}")
         entry_path = f"{prefix}/{path}".strip("/") if prefix else path.strip("/")
-        new_paths.add(entry_path)
-        tree_entries.append({
-            "path": entry_path,
-            "mode": "100644",
-            "type": "blob",
-            "sha": blob["sha"],
-        })
+        return entry_path, blob_data["sha"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_upload_blob, item): item[0] for item in sorted(package.items())}
+        for future in concurrent.futures.as_completed(futures):
+            entry_path, blob_sha = future.result()
+            new_paths.add(entry_path)
+            tree_entries.append({
+                "path": entry_path,
+                "mode": "100644",
+                "type": "blob",
+                "sha": blob_sha,
+            })
 
     # 2b. Remove files that existed under `prefix` in a previous run but
     # aren't in this one (e.g. a renamed/dropped table's old TMDL file).
-    # `base_tree` only ever gets new/updated blobs merged on top of it, so
-    # without an explicit deletion (sha: None) a shrinking package would
-    # leave stale files behind forever — this is what makes "overwrite the
-    # app folder on each run" actually true, not just additive.
     if base_tree and prefix:
         tree_entries.extend(
-            _stale_deletions(base, headers, base_tree, prefix, new_paths)
+            _stale_deletions(base, {}, base_tree, prefix, new_paths, session=session)
         )
 
     # 3. Tree -> commit -> ref.
@@ -147,8 +194,8 @@ def deploy(
         tree_payload["base_tree"] = base_tree
 
     tree = _check(
-        requests.post(
-            f"{base}/git/trees", headers=headers,
+        session.post(
+            f"{base}/git/trees",
             json=tree_payload, timeout=120,
         ),
         "create tree",
@@ -159,8 +206,8 @@ def deploy(
         "parents": [head_sha] if head_sha else [],
     }
     new_commit = _check(
-        requests.post(
-            f"{base}/git/commits", headers=headers,
+        session.post(
+            f"{base}/git/commits",
             json=commit_payload,
             timeout=120,
         ),
@@ -168,18 +215,23 @@ def deploy(
     )
 
     if create_branch:
-        _check(
-            requests.post(
-                f"{base}/git/refs", headers=headers,
-                json={"ref": f"refs/heads/{branch}", "sha": new_commit["sha"]}, timeout=60,
-            ),
-            "create branch",
+        resp = session.post(
+            f"{base}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": new_commit["sha"]}, timeout=60,
         )
+        if resp.status_code >= 300:
+            _check(
+                session.patch(
+                    f"{base}/git/refs/heads/{branch}",
+                    json={"sha": new_commit["sha"], "force": True}, timeout=60,
+                ),
+                "update branch (fallback)",
+            )
     else:
         _check(
-            requests.patch(
-                f"{base}/git/refs/heads/{branch}", headers=headers,
-                json={"sha": new_commit["sha"], "force": False}, timeout=60,
+            session.patch(
+                f"{base}/git/refs/heads/{branch}",
+                json={"sha": new_commit["sha"], "force": True}, timeout=60,
             ),
             "update branch",
         )
