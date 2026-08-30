@@ -1,0 +1,6 @@
+{
+  "run_id": "pm-test-001",
+  "target": "powerbi_desktop",
+  "offline_sample_data": true,
+  "include_artifacts": false
+}

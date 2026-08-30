@@ -1,0 +1,9 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+requests==2.33.1
+python-dotenv==1.2.2
+
+# tests
+pytest==8.4.2
+httpx==0.28.1
