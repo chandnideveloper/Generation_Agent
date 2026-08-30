@@ -48,13 +48,38 @@ def _is_calculated(
 
 
 def _extract_column_expressions(qlik_query: str) -> Dict[str, str]:
-    """Parse `expr as Alias` from Qlik load script dynamically."""
+    """Parse `expr as Alias` from Qlik load script dynamically.
+
+    Skips in-place transforms where the alias equals the source column
+    (e.g. ``Upper(Trim(home_terminal)) as home_terminal``).  These are
+    simple data-cleansing ops that map 1-to-1 to the physical column
+    and must NOT become calculated columns — otherwise Power BI sees a
+    duplicate column name error.
+    """
     if not qlik_query:
         return {}
     results = {}
     pattern = r"((?:If|Date|Month|MonthStart|MonthName|Year|Week|Num|ApplyMap|Upper|Lower|Trim|Text|Dual)\s*\([\s\S]+?\))\s+as\s+([A-Za-z0-9_#]+)"
     for match in re.finditer(pattern, qlik_query, re.IGNORECASE):
         expr, alias = match.group(1).strip(), match.group(2).strip()
+
+        # Detect in-place transforms: if the expression only wraps the
+        # alias column itself (Upper/Lower/Trim nesting), skip it.
+        # e.g. Upper(Trim(home_terminal)) as home_terminal
+        inner = expr
+        while True:
+            m = re.match(
+                r"(?:upper|lower|trim)\s*\(\s*(.+?)\s*\)\s*$",
+                inner, re.IGNORECASE,
+            )
+            if m:
+                inner = m.group(1).strip()
+            else:
+                break
+        if inner.lower() == alias.lower():
+            # Pure in-place transform — keep as physical sourceColumn
+            continue
+
         results[alias.lower()] = expr
     return results
 
