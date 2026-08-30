@@ -199,13 +199,15 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
         grid = layout_util.sheet_grid(sheets.get(sheet_name, {}), visuals=sheet_visuals)
         columns, rows = grid
 
-        # Calculate exact sheet page height based on Qlik row count
-        if rows > 12:
-            page_height = max(config.CANVAS_HEIGHT, int(round(rows * 60.0)))
-            display_option = "FitToWidth"
-        else:
-            page_height = config.CANVAS_HEIGHT
-            display_option = "FitToPage"
+        # Calculate exact sheet page height based on Qlik row count and visual bounds
+        base_height = max(config.CANVAS_HEIGHT, int(round(rows * 60.0))) if rows > 12 else config.CANVAS_HEIGHT
+        max_bottom = 0
+        for position, visual in enumerate(sheet_visuals):
+            c_test = layout_util.to_canvas(visual, grid, position, canvas_height=base_height)
+            max_bottom = max(max_bottom, c_test["y"] + c_test["height"])
+
+        page_height = max(base_height, max_bottom + 40)
+        display_option = "FitToWidth" if page_height > config.CANVAS_HEIGHT else "FitToPage"
 
         for position, visual in enumerate(sheet_visuals):
             canvas = layout_util.to_canvas(visual, grid, position, canvas_height=page_height)

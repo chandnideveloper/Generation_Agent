@@ -30,8 +30,37 @@ def _home_table(item: Dict[str, Any], known: List[str]) -> str:
 
 import re
 
+def _fix_single_arg_math(dax: str) -> str:
+    """Ensure FLOOR(x, 1) and CEILING(x, 1) have 2 arguments in DAX."""
+    if not dax:
+        return dax
+    out = dax
+    for func in ["FLOOR", "CEIL", "CEILING"]:
+        pattern = re.compile(rf"\b{func}\s*\(", re.IGNORECASE)
+        for m in list(pattern.finditer(out)):
+            start_paren = m.end() - 1
+            depth = 1
+            idx = start_paren + 1
+            has_comma_at_depth_1 = False
+            while idx < len(out) and depth > 0:
+                if out[idx] == "(":
+                    depth += 1
+                elif out[idx] == ")":
+                    depth -= 1
+                elif out[idx] == "," and depth == 1:
+                    has_comma_at_depth_1 = True
+                idx += 1
+            if depth == 0 and not has_comma_at_depth_1:
+                func_name = "CEILING" if func.upper() in ("CEIL", "CEILING") else "FLOOR"
+                inner = out[start_paren + 1 : idx - 1].strip()
+                replacement = f"{func_name}({inner}, 1)"
+                out = out[: m.start()] + replacement + out[idx :]
+                return _fix_single_arg_math(out)
+    return out
+
+
 def _clean_dax(dax_expr: str) -> str:
-    """Unwrap nested column references, fix COUNT(DISTINCT), and clean suffixed table names."""
+    """Unwrap nested column references, fix single-arg FLOOR/CEILING, COUNT(DISTINCT), and clean suffixed table names."""
     if not dax_expr:
         return dax_expr
     cleaned = dax_expr
@@ -49,6 +78,20 @@ def _clean_dax(dax_expr: str) -> str:
             cleaned = re.sub(r"'[^']+'\[\s*('([^']+)\[[^\]]+\])\s*\]", r"\1", cleaned)
         else:
             break
+
+    # Fix table prefix inside column: 'TABLE'[TABLE.COLUMN] -> 'TABLE'[COLUMN]
+    def _unwrap_prefixed_col(m: re.Match) -> str:
+        tbl, col = m.group(1), m.group(2).strip("'\"`")
+        if "." in col:
+            parts = col.split(".", 1)
+            if parts[0].strip().lower() == tbl.strip().lower():
+                return f"'{tbl}'[{parts[1].strip()}]"
+        return f"'{tbl}'[{col}]"
+    cleaned = re.sub(r"'([^']+)'\[([^\]]+)\]", _unwrap_prefixed_col, cleaned)
+
+    # Fix FLOOR(x) -> FLOOR(x, 1) and CEIL(x) -> CEILING(x, 1)
+    cleaned = _fix_single_arg_math(cleaned)
+
     cleaned = re.sub(r"'([A-Za-z0-9_]+)-\d+'", r"'\1'", cleaned)
     cleaned = re.sub(r"'([A-Za-z0-9_]+)_Raw'", r"'\1'", cleaned, flags=re.IGNORECASE)
     return cleaned
@@ -87,26 +130,31 @@ def _repair_dax_columns(
     valid_columns: Optional[Set[Tuple[str, str]]] = None,
 ) -> str:
     """Validate that every column reference 'Table'[Column] points to a column that exists.
-    If not, intelligently repair it using semantic matching against real columns."""
+    If not, intelligently repair it using semantic matching against real columns across the model."""
     if not dax_expr or not valid_columns:
         return dax_expr
 
     def replace_col(match: re.Match) -> str:
         t_name = match.group(1)
-        c_name = match.group(2)
+        c_name = match.group(2).strip("'\"`")
+        if "." in c_name:
+            p = c_name.split(".", 1)
+            if p[0].strip().lower() == t_name.strip().lower():
+                c_name = p[1].strip()
+
         if (t_name, c_name) in valid_columns:
-            return match.group(0)
+            return f"'{t_name}'[{c_name}]"
 
         # Non-existent column reference! Repair it!
         c_lower = c_name.lower()
         cols_in_table = [c for t, c in valid_columns if t.lower() == t_name.lower()]
 
-        # 1. Exact case-insensitive match
+        # 1. Exact case-insensitive match in table
         for c in cols_in_table:
             if c.lower() == c_lower:
                 return f"'{t_name}'[{c}]"
 
-        # 2. Semantic matching
+        # 2. Semantic matching in current table
         if any(k in c_lower for k in ["quant", "qty", "units sold", "units", "unit"]):
             matched = next((c for c in cols_in_table if any(k in c.lower() for k in ["quant", "qty"]) or (c.lower() == "units")), None)
             if not matched:
@@ -126,19 +174,23 @@ def _repair_dax_columns(
             if matched:
                 return f"'{t_name}'[{matched}]"
 
-        # 3. Fuzzy match
+        # 3. Substring matching in current table (e.g. "Category" -> "COURSE_CATEGORY")
+        sub_match = next((c for c in cols_in_table if c_lower in c.lower() or c.lower() in c_lower), None)
+        if sub_match:
+            return f"'{t_name}'[{sub_match}]"
+
+        # 4. Cross-table matching: is this column on another table in the model?
+        cross_match = next(((t, c) for t, c in valid_columns if c.lower() == c_lower or c_lower in c.lower()), None)
+        if cross_match:
+            return f"'{cross_match[0]}'[{cross_match[1]}]"
+
+        # 5. Fuzzy match in current table
         import difflib
-        close = difflib.get_close_matches(c_name, cols_in_table, n=1, cutoff=0.6)
+        close = difflib.get_close_matches(c_name, cols_in_table, n=1, cutoff=0.5)
         if close:
             return f"'{t_name}'[{close[0]}]"
 
-        # 4. If column was 'Transactions' and used in SUM, replace with real col or fallback
-        if "transaction" in c_lower or "order" in c_lower:
-            id_col = next((c for c in cols_in_table if "id" in c.lower()), None)
-            if id_col:
-                return f"'{t_name}'[{id_col}]"
-
-        # Fallback to first column in table
+        # 6. Fallback to first column in table
         if cols_in_table:
             return f"'{t_name}'[{cols_in_table[0]}]"
 

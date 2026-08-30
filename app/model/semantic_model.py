@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Set, Tuple
 from app.config import config
 from app.model import measure_tmdl
 from app.model.expressions_tmdl import build_expressions
+from app.model.parameters_tmdl import build_parameters_tmdl
 from app.report import pbir_schemas as S
 from app.model.relationship_tmdl import build_relationships
 from app.model.table_tmdl import _clean_table_name, build_tables
@@ -88,11 +89,21 @@ def build_semantic_model(
     relationships = P.relationships(mapping)
 
     table_files = build_tables(tables)
+
+    # Build dynamic single unified Parameters table if variables exist
+    params_tmdl = build_parameters_tmdl(mapping)
+    if params_tmdl:
+        table_files["Parameters"] = params_tmdl
+
     table_names = list(table_files)
 
     # Collect valid physical columns from table definitions
     valid_columns: Set[Tuple[str, str]] = set()
     key_columns: Set[Tuple[str, str]] = set()
+    if params_tmdl:
+        for pcol in ["Parameter", "Value", "Label", "Order"]:
+            valid_columns.add(("Parameters", pcol))
+
     for table in tables:
         raw_name = text(table.get("name") or table.get("table_name"))
         name = _clean_table_name(raw_name)

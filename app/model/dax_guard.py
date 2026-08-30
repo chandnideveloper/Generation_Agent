@@ -59,6 +59,11 @@ QLIK_LEFTOVERS: List[Tuple[re.Pattern, str, str]] = [
         "Qlik SUM(TOTAL ...) has no DAX equivalent",
         "Use CALCULATE(SUM(...), ALL(...)) to disregard current filters.",
     ),
+    (
+        re.compile(r"\b\w+_Set\b", re.IGNORECASE),
+        "Qlik set identifier has no direct DAX equivalent",
+        "Convert set identifier into CALCULATE filter arguments.",
+    ),
 ]
 
 # 'Table'['Other'[col]] — a nested reference the converter can produce.

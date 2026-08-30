@@ -232,6 +232,9 @@ def build_visual(
                 bucket.append(proj)
             else:
                 unbound.append(field_clean)
+        if not bucket and visual_type == "slicer" and qlik_type in ("qlik-variable-input", "variable-input", "variableinput", "variable"):
+            # Variable input slicer bound to dynamic Parameters table
+            bucket.append(_projection("Parameters", "Label", 0))
         if bucket:
             projections[category_role] = bucket
 
@@ -248,25 +251,29 @@ def build_visual(
             return None
 
         # dimensions → Details (the category/color grouping)
-        det_bucket = [p for i, f in enumerate(dimensions) if (p := _resolve_scatter_field(f, i, False)) is not None]
-        if det_bucket:
-            projections["Details"] = det_bucket
+        for i, d in enumerate(dimensions):
+            p = _resolve_scatter_field(d, i, False)
+            if p:
+                projections.setdefault("Details", []).append(p)
 
-        # measures → X Axis, Y Axis, Size
+        # measures[0] → X Axis, measures[1] → Y Axis, measures[2] → Size
+        x_fields = measures[:1]
+        y_fields = measures[1:2]
+        z_fields = measures[2:3]
+        if not y_fields and len(measures) == 1:
+            y_fields = x_fields
+            x_fields = []
         x_bucket = []
-        y_bucket = []
-        size_bucket = []
-        z_fields = list(as_list(fabric.get("z_axis_fields") or source.get("z_axis") or []))
-        for i, f in enumerate(measures):
-            p = _resolve_scatter_field(f, i, True)
-            if p is None:
-                continue
-            if i == 0:
+        for f in x_fields:
+            p = _resolve_scatter_field(f, len(x_bucket), True)
+            if p:
                 x_bucket.append(p)
-            elif i == 1:
+        y_bucket = []
+        for f in y_fields:
+            p = _resolve_scatter_field(f, len(y_bucket), True)
+            if p:
                 y_bucket.append(p)
-            else:
-                size_bucket.append(p)
+        size_bucket = []
         for f in z_fields:
             p = _resolve_scatter_field(f, len(size_bucket), True)
             if p:
@@ -347,10 +354,29 @@ def build_visual(
         or as_dict(source.get("coloring"))
         or as_dict(fabric.get("coloring"))
     )
+
+    # Extract measure color from parsing conditional_coloring (e.g. #002833)
+    meas_color = None
+    for m in as_list(source.get("measures")):
+        if isinstance(m, dict):
+            cc = as_dict(m.get("conditional_coloring"))
+            psc = as_dict(cc.get("paletteSingleColor"))
+            if psc.get("color"):
+                meas_color = psc.get("color")
+                break
+            if cc.get("singleColor") and isinstance(cc.get("singleColor"), str):
+                meas_color = cc.get("singleColor")
+                break
+            coloring = as_dict(m.get("coloring"))
+            if coloring.get("color"):
+                meas_color = coloring.get("color")
+                break
+
     single_color = (
         text(custom_coloring.get("single_color"))
         or text(custom_coloring.get("baseColor"))
         or text(custom_coloring.get("color"))
+        or text(meas_color)
     )
 
     # ── actionButton: add action object ──────────────────────────────────────
@@ -396,8 +422,25 @@ def build_visual(
         }}]
 
     # ── Canvas / Container background ─────────────────────────────────────────
-    bg_color = text(style.get("background_color") or style.get("backgroundColor") or style.get("bgColor"))
-    if bg_color and bg_color != "default":
+    formatting_dict = as_dict(source.get("formatting"))
+    components_list = as_list(as_dict(source.get("style_and_formatting")).get("components"))
+    comp_bg = None
+    for c in components_list:
+        if isinstance(c, dict) and c.get("key") == "general":
+            bg_c = as_dict(c.get("bgColor")).get("color")
+            if isinstance(bg_c, dict) and bg_c.get("color"):
+                comp_bg = bg_c.get("color")
+            elif isinstance(bg_c, str):
+                comp_bg = bg_c
+
+    bg_color = text(
+        style.get("background_color")
+        or formatting_dict.get("background_color")
+        or comp_bg
+        or style.get("backgroundColor")
+        or style.get("bgColor")
+    )
+    if bg_color and bg_color.lower() not in ("default", "none", "auto"):
         objects["background"] = [{
             "properties": {
                 "show": {"expr": {"Literal": {"Value": "true"}}},
@@ -406,12 +449,19 @@ def build_visual(
             }
         }]
 
-    if single_color and single_color != "default":
-        objects["dataPoint"] = [{
-            "properties": {
-                "fill": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{single_color}'"}}}}}
-            }
-        }]
+    if single_color and single_color.lower() not in ("default", "none", "auto"):
+        if visual_type == "card":
+            objects["valueLabel"] = [{
+                "properties": {
+                    "fontColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{single_color}'"}}}}}
+                }
+            }]
+        else:
+            objects["dataPoint"] = [{
+                "properties": {
+                    "fill": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{single_color}'"}}}}}
+                }
+            }]
 
     # 4. Reference lines
     ref_lines = (
