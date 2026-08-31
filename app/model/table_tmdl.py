@@ -243,9 +243,14 @@ CONNECTOR_M_FUNCTIONS = {
     "postgresql": ("PostgreSQL.Database", lambda ep, db, sch, q: f'let\n    Source = PostgreSQL.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
     "sqlserver": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
     "mssql": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
+    "sql": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
     "mysql": ("MySQL.Database", lambda ep, db, sch, q: f'let\n    Source = MySQL.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
     "oracle": ("Oracle.Database", lambda ep, db, sch, q: f'let\n    Source = Oracle.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
+    "bigquery": ("GoogleBigQuery.Database", lambda ep, db, sch, q: f'let\n    Source = GoogleBigQuery.Database(),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
     "databricks": ("Databricks.Catalogs", lambda ep, db, sch, q: f'let\n    Source = Databricks.Catalogs("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
+    "teradata": ("Teradata.Database", lambda ep, db, sch, q: f'let\n    Source = Teradata.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
+    "hana": ("SapHana.Database", lambda ep, db, sch, q: f'let\n    Source = SapHana.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
+    "synapse": ("AzureSynapse.Database", lambda ep, db, sch, q: f'let\n    Source = AzureSynapse.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
 }
 
 
@@ -424,16 +429,17 @@ def _mquery(table: Dict[str, Any], name: str) -> str:
     fabric = as_dict(table.get("fabric"))
     if "mapping load" in qlik_query.lower() or (load_type == "resident" and "resident " in qlik_query.lower()):
         match = re.search(r"resident\s+([A-Za-z0-9_\-]+)", qlik_query, re.IGNORECASE)
-        upstream = _clean_table_name(match.group(1)) if match else "Trucks"
-        if upstream != name:
-            cols = [text(c.get("fabric_column_name") or c.get("name")) for c in as_list(table.get("columns")) if isinstance(c, dict)]
-            cols_str = ", ".join(f'"{c}"' for c in cols if c)
-            if cols_str:
-                return f'let\n    Source = #"{upstream}",\n    SelectedColumns = Table.SelectColumns(Source, {{{cols_str}}})\nin\n    SelectedColumns'
-            return f'let\n    Source = #"{upstream}"\nin\n    Source'
+        if match:
+            upstream = _clean_table_name(match.group(1))
+            if upstream != name:
+                cols = [text(c.get("fabric_column_name") or c.get("name")) for c in as_list(table.get("columns")) if isinstance(c, dict)]
+                cols_str = ", ".join(f'"{c}"' for c in cols if c)
+                if cols_str:
+                    return f'let\n    Source = #"{upstream}",\n    SelectedColumns = Table.SelectColumns(Source, {{{cols_str}}})\nin\n    SelectedColumns'
+                return f'let\n    Source = #"{upstream}"\nin\n    Source'
 
     conn = as_dict(table.get("connection_details")) or as_dict(table.get("connection"))
-    driver = text(conn.get("driver") or conn.get("source_connector") or conn.get("connector_type") or conn.get("type")).lower() or "redshift"
+    driver = text(conn.get("driver") or conn.get("source_connector") or conn.get("connector_type") or conn.get("type")).lower() or "generic"
 
     server = text(conn.get("server") or conn.get("host") or conn.get("endpoint"))
     port = text(conn.get("port"))
@@ -447,12 +453,9 @@ def _mquery(table: Dict[str, Any], name: str) -> str:
                 schema = match_from.group(1)
             extracted_table = match_from.group(2)
 
-    if not schema:
-        schema = "fleetvision"
-
     raw_source = extracted_table or text(table.get("source") or table.get("table_name") or name)
     clean_source = _clean_table_name(raw_source)
-    sql_table = _to_snake_case(clean_source)
+    sql_table = _to_snake_case(clean_source) if schema else clean_source
 
     # Check for custom SQL with aliases in mapping or extracted from Qlik script
     custom_sql = text(table.get("custom_sql") or table.get("sql") or table.get("query") or fabric.get("custom_sql"))
@@ -461,23 +464,18 @@ def _mquery(table: Dict[str, Any], name: str) -> str:
         if extracted and " as " in extracted.lower():
             custom_sql = extracted
 
-    if custom_sql and " as " in custom_sql.lower():
-        query_str = re.sub(r"\s+", " ", custom_sql.replace('"', '""')).strip()
-        for token, (func_name, generator_fn) in CONNECTOR_M_FUNCTIONS.items():
-            if token in driver:
-                endpoint = f"{server}:{port}" if port and port not in server else server
-                if endpoint and database:
-                    return generator_fn(endpoint, database, schema, query_str)
-        endpoint = f"{server}:{port}" if port and port not in server else server
-        return f'let\n    Source = AmazonRedshift.Database("{endpoint}", "{database}"),\n    Result = Value.NativeQuery(Source, "{query_str}", null, [EnableFolding=false])\nin\n    Result'
-
-    query_str = re.sub(r"\s+", " ", custom_sql.replace('"', '""')).strip() if custom_sql else f"SELECT * FROM {schema}.{sql_table}"
+    target_schema_table = f"{schema}.{sql_table}" if schema else sql_table
+    query_str = re.sub(r"\s+", " ", custom_sql.replace('"', '""')).strip() if custom_sql else f"SELECT * FROM {target_schema_table}"
 
     for token, (func_name, generator_fn) in CONNECTOR_M_FUNCTIONS.items():
         if token in driver:
             endpoint = f"{server}:{port}" if port and port not in server else server
-            if endpoint and database:
-                return generator_fn(endpoint, database, schema, query_str)
+            if endpoint:
+                return generator_fn(endpoint, database or "", schema or "", query_str)
+
+    if server and database:
+        endpoint = f"{server}:{port}" if port and port not in server else server
+        return f'let\n    Source = Sql.Database("{endpoint}", "{database}"),\n    Result = Value.NativeQuery(Source, "{query_str}")\nin\n    Result'
 
     return f'let\n    Source = Table.FromRows({{}}, {{"{name}"}})\nin\n    Source'
 

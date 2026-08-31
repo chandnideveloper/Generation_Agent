@@ -30,8 +30,13 @@ CONNECTOR_FUNCTIONS = {
     "mysql": "MySQL.Database",
     "sqlserver": "Sql.Database",
     "mssql": "Sql.Database",
+    "sql": "Sql.Database",
     "oracle": "Oracle.Database",
+    "bigquery": "GoogleBigQuery.Database",
     "databricks": "Databricks.Catalogs",
+    "teradata": "Teradata.Database",
+    "hana": "SapHana.Database",
+    "synapse": "AzureSynapse.Database",
 }
 
 

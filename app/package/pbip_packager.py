@@ -62,18 +62,28 @@ def build_package(
 import shutil
 
 
+def _win_safe_path(p: str) -> str:
+    """Return a path that avoids Windows MAX_PATH (260 character) limitation."""
+    abs_p = os.path.abspath(p)
+    if os.name == "nt" and not abs_p.startswith("\\\\?\\") and len(abs_p) > 200:
+        return "\\\\?\\" + abs_p
+    return abs_p
+
+
 def write_to_disk(files: Dict[str, str], output_dir: str) -> Dict[str, Any]:
     """Materialize the package. Returns the root path and file count."""
     root = os.path.abspath(output_dir)
-    if os.path.exists(root):
-        shutil.rmtree(root)
-    os.makedirs(root, exist_ok=True)
+    safe_root = _win_safe_path(root)
+    if os.path.exists(safe_root):
+        shutil.rmtree(safe_root, ignore_errors=True)
+    os.makedirs(safe_root, exist_ok=True)
 
     written = 0
     for relative_path, content in files.items():
         destination = os.path.join(root, *relative_path.split("/"))
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        with open(destination, "w", encoding="utf-8", newline="\n") as handle:
+        safe_dest = _win_safe_path(destination)
+        os.makedirs(os.path.dirname(safe_dest), exist_ok=True)
+        with open(safe_dest, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
         written += 1
 
