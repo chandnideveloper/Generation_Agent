@@ -13,6 +13,7 @@ import datetime
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 
 from app.config import config
@@ -30,10 +31,45 @@ from app.util.payload import app_identity, unwrap_mapping
 
 logger = get_logger(__name__)
 
+# Agent-action/result logging is telemetry, not part of the generation
+# result - it must never add its own network latency (or, worse, hang
+# indefinitely) to the request path. `generate()` is a plain sync function
+# called ~12 times per run for distinct milestones, and used to `requests.
+# post` sequentially against up to 5 candidate bases *inline* on the calling
+# thread; when none of those bases were reachable (a slow/unset
+# MONGO_API_URL, no local logging sidecar running), every single call
+# blocked for its full per-attempt timeout, multiplying into tens of seconds
+# of pure dead time per run - and once one attempt's connect actually hung
+# rather than being refused, that time was unbounded. Dispatching to a
+# small background pool makes every telemetry call fire-and-forget, exactly
+# like the equivalent fix already applied on the mapping-agent side.
+_TELEMETRY_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-telemetry")
+
+
+def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple) -> None:
+    import requests
+    bases = [
+        "http://127.0.0.1:8008",
+        "http://localhost:8008",
+        "http://127.0.0.1:8005",
+        "http://localhost:8005",
+        config.MONGO_API_URL,
+    ]
+    for base in bases:
+        if not base:
+            continue
+        try:
+            url = f"{base.rstrip('/')}/{path.lstrip('/')}"
+            res = requests.post(url, json=payload, timeout=timeout)
+            if res.status_code in (200, 201):
+                return
+        except Exception:
+            pass
+
 
 def _log_action_sync(action: str, request: GenerateRequest, app_name: str, details: str = "") -> None:
-    """Log an agent action to MongoDB agent_actions collection."""
-    import requests
+    """Record one agent action for the run's activity trail, without
+    blocking generation on the logging endpoint being reachable."""
     run_id = request.run_id or "unknown"
     workspace_id = request.workspace_id or request.space_id or "personal"
     app_id = request.app_id or "unknown"
@@ -53,23 +89,7 @@ def _log_action_sync(action: str, request: GenerateRequest, app_name: str, detai
         "type": "agent_activity",
         "status": "success",
     }
-    bases = [
-        "http://127.0.0.1:8008",
-        "http://localhost:8008",
-        "http://127.0.0.1:8005",
-        "http://localhost:8005",
-        config.MONGO_API_URL,
-    ]
-    for base in bases:
-        if not base:
-            continue
-        try:
-            url = f"{base.rstrip('/')}/agent-actions"
-            res = requests.post(url, json=payload, timeout=(1, 3))
-            if res.status_code in (200, 201):
-                return
-        except Exception:
-            pass
+    _TELEMETRY_POOL.submit(_post_with_fallback, "agent-actions", payload, (1, 3))
 
 
 def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict[str, Any]:
@@ -110,20 +130,57 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         )
         _log_action_sync("Generated PBIR report files", request, app_name, f"Emitted {len(report_files)} report & visual files")
 
+        # Surfacing whether the report's theme actually came from the source
+        # Qlik app or a generic fallback (see unified-parsing's
+        # theme_and_styling.source and app/report/theme.py) makes a silent
+        # "no branding found" gap visible in the run's own activity trail,
+        # instead of looking identical to a successful theme carry-through.
+        theme_source = P.as_dict(P.as_dict(mapping.get("app_layout")).get("theme")).get("source")
+        if theme_source in ("qlik_theme", "qlik_theme_partial"):
+            _log_action_sync(
+                "Resolved report theme from source Qlik app", request, app_name,
+                f"Applied the source app's own color palette/branding (source={theme_source})",
+            )
+        else:
+            _log_action_sync(
+                "Applied default report theme", request, app_name,
+                "No usable theme/palette was found on the source app; used the generic fallback palette",
+            )
+
+        nav_button_count = report_stats.get("navigation_buttons", 0) if isinstance(report_stats, dict) else 0
+        _log_action_sync(
+            "Wired page navigation buttons", request, app_name,
+            f"{nav_button_count} navigation button(s) across {report_stats.get('pages', 0) if isinstance(report_stats, dict) else 0} page(s)",
+        )
+
     package = pbip_packager.build_package(app_name, model_files, report_files)
     package_store.save(run_id, package, request.app_id or identity.get("app_id"))
+    _log_action_sync("Persisted package to run store", request, app_name, f"run_id={run_id}")
 
-    # 3. UNCONDITIONAL DISK PERSISTENCE FOR EVERY RUN
-    # Every run is materialized under its own dynamic folder: generated/<app_name>/<run_id>/
-    destination = os.path.join(
-        config.OUTPUT_DIR,
-        slug(app_name, fallback=f"app-{ts_str}"),
-        slug(run_id, fallback=f"run-{ts_str}"),
-    )
-    disk_write_result = pbip_packager.write_to_disk(package, destination)
+    # 3. Disk persistence, unless the caller asked to skip it (push_only /
+    # write_to_disk=False - e.g. a Fabric-only push where nothing local is
+    # needed). Every run that IS written goes under its own dynamic folder:
+    # generated/<app_name>/<run_id>/. This used to run unconditionally
+    # regardless of either flag, silently ignoring the caller's choice.
+    disk_write_result: Dict[str, Any] = {}
+    if request.write_to_disk and not request.push_only:
+        destination = os.path.join(
+            config.OUTPUT_DIR,
+            slug(app_name, fallback=f"app-{ts_str}"),
+            slug(run_id, fallback=f"run-{ts_str}"),
+        )
+        disk_write_result = pbip_packager.write_to_disk(package, destination)
+        _log_action_sync("Wrote generated package to disk", request, app_name, f"path={disk_write_result.get('output_path')}")
+    else:
+        _log_action_sync("Skipped disk write", request, app_name, "push_only/write_to_disk=False requested")
 
     # 4. Structural validation of the emitted package
     validation = validator.validate(package, app_name)
+    _log_action_sync(
+        "Validated generated package structure", request, app_name,
+        f"ok={validation.get('ok')}, errors={len(validation.get('errors', []))}, "
+        f"warnings={len(validation.get('warnings', []))}",
+    )
 
     result: Dict[str, Any] = {
         "status": "success" if validation["ok"] else "warning",
@@ -154,11 +211,25 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
             result["semantic_model"] = tree.get("semantic_model", {})
             result["report"] = tree.get("report", {})
 
+    if request.deploy != Deploy.NONE:
+        _log_action_sync(
+            "Starting deployment", request, app_name,
+            f"target={request.deploy.value}, workspace={request.workspace_id or request.space_id}",
+        )
     result["deployment"] = _deploy(package, app_name, request, result)
+    if request.deploy != Deploy.NONE:
+        dep_status = result["deployment"].get("status", "unknown")
+        _log_action_sync(
+            "Deployment finished", request, app_name,
+            f"target={request.deploy.value}, status={dep_status}",
+        )
 
-    # Clearly reflect deployment outcome in top-level status and message
+    # Deployment outcome is reported in its own `deployment` block and in the
+    # message, not by overwriting the top-level `status` - the package was
+    # already built successfully (or not) independent of whether pushing it
+    # to a remote target then failed, and a deployment failure must not make
+    # an otherwise-successful, already-materialized package look lost.
     if result["deployment"].get("status") == "error":
-        result["status"] = "error"
         result["message"] = f"Package generated locally, but deployment to {request.deploy.value} failed: {result['deployment'].get('error')}"
     elif result["deployment"].get("status") == "success":
         dep = result["deployment"]
@@ -175,8 +246,8 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
 
 
 def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name: str) -> None:
-    """Persist the generation result in the MongoDB microservice."""
-    import requests
+    """Persist the generation result in the MongoDB microservice, without
+    blocking the caller on that service being reachable (see _log_action_sync)."""
     doc = {
         "id": request.run_id or request.app_id or slug(app_name),
         "app_id": request.app_id,
@@ -198,25 +269,7 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
         },
     }
 
-    bases = [
-        "http://127.0.0.1:8008",
-        "http://localhost:8008",
-        "http://127.0.0.1:8005",
-        "http://localhost:8005",
-        config.MONGO_API_URL,
-    ]
-
-    for base in bases:
-        if not base:
-            continue
-        try:
-            url = f"{base.rstrip('/')}/report-generation"
-            res = requests.post(url, json=doc, timeout=(2, 5))
-            if res.status_code in (200, 201):
-                logger.info("Saved report generation result to MongoDB: %s", url)
-                return
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not save report generation to %s: %s", base, exc)
+    _TELEMETRY_POOL.submit(_post_with_fallback, "report-generation", doc, (2, 5))
 
 
 def _deploy(

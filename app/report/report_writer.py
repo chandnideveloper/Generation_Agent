@@ -225,19 +225,25 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
                 note["sheet"] = sheet_name
                 notes.append(note)
 
-        # Qlik sheets with native action buttons or top-row visuals (y < 45)
-        # do not get duplicate top nav buttons to prevent overlapping visuals.
+        # Qlik sheets that already carry a native action button do not get a
+        # duplicate synthetic top nav strip. Real dashboards almost always
+        # have *some* visual near the top of the page (a KPI row, a header
+        # chart), so gating on "any visual at y < 45" as this used to do
+        # suppressed the synthetic strip for virtually every populated
+        # sheet - a multi-page report could end up with zero navigation
+        # buttons of any kind, exactly the "buttons don't work" symptom.
+        # `power_bi_visual_type` carries a `visualType` key (not `type`),
+        # and mapping's own `fabric.visual_type` is the primary, always-
+        # populated signal - check that directly instead of a key that
+        # was never actually present in mapping's output shape.
         has_native_nav = any(
-            (as_dict(v.get("qlik_source")).get("chart_type") in ("action-button", "actionButton", "button")
-             or as_dict(as_dict(v.get("fabric")).get("power_bi_visual_type")).get("type") == "actionButton"
+            (as_dict(v.get("fabric")).get("visual_type") == "actionButton"
+             or as_dict(v.get("qlik_source")).get("chart_type") in ("action-button", "actionButton", "button")
+             or as_dict(as_dict(v.get("fabric")).get("power_bi_visual_type")).get("visualType") == "actionButton"
              or v.get("name") == "ActionButton")
             for v in sheet_visuals
         )
-        has_top_visuals = any(
-            (layout_util.to_canvas(v, grid, i, canvas_height=page_height)["y"] < 45)
-            for i, v in enumerate(sheet_visuals)
-        )
-        if not has_native_nav and not has_top_visuals and len(page_titles) > 1:
+        if not has_native_nav and len(page_titles) > 1:
             for button in bookmark_builder.build_navigation_buttons(page_titles, page_ids, sheet_name):
                 button_id = safe_filename(button["name"], f"nav{nav_button_count}")
                 files[f"definition/pages/{page_id}/visuals/{button_id}/visual.json"] = (

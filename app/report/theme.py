@@ -21,6 +21,7 @@ def build_theme_json(mapping: Optional[Dict[str, Any]] = None) -> str:
     primary_color = "#0065B3"
     font_family = "Segoe UI"
 
+    found_primary = False
     if mapping and isinstance(mapping, dict):
         # 1. Check top-level themes
         themes_obj = mapping.get("themes")
@@ -31,18 +32,28 @@ def build_theme_json(mapping: Optional[Dict[str, Any]] = None) -> str:
                 palette = [str(c) for c in pal if str(c).startswith("#")]
             if t.get("primary_color") or t.get("primaryColor"):
                 primary_color = str(t.get("primary_color") or t.get("primaryColor"))
+                found_primary = True
             if t.get("background_color") or t.get("backgroundColor"):
                 bg_color = str(t.get("background_color") or t.get("backgroundColor"))
             if t.get("font_family") or t.get("fontFamily"):
                 font_family = str(t.get("font_family") or t.get("fontFamily"))
 
-        # 2. Check app_layout / app_metadata
+        # 2. Check app_layout.theme - the shape unified-parsing's theme
+        # enrichment actually produces (color_palette/primary_color/
+        # background_color/font_family), not just the generic
+        # palette/colors keys section 1 above checks for a raw themes list.
         app_layout = as_dict(mapping.get("app_layout"))
         if app_layout.get("theme"):
             t_data = as_dict(app_layout.get("theme"))
-            pal = t_data.get("palette") or t_data.get("colors")
+            pal = t_data.get("color_palette") or t_data.get("palette") or t_data.get("colors")
             if isinstance(pal, list) and pal and not palette:
                 palette = [str(c) for c in pal if str(c).startswith("#")]
+            if not found_primary and t_data.get("primary_color"):
+                primary_color = str(t_data["primary_color"])
+            if t_data.get("background_color"):
+                bg_color = str(t_data["background_color"])
+            if t_data.get("font_family"):
+                font_family = str(t_data["font_family"])
 
         # 3. Collect any visual-level custom colors
         for vis in as_list(mapping.get("visuals", {}).get("sheet_visuals") if isinstance(mapping.get("visuals"), dict) else mapping.get("visuals")):

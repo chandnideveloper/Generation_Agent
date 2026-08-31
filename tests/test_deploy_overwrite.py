@@ -50,9 +50,18 @@ def test_github_deploy_removes_stale_files_under_prefix():
             return _resp(200, {})
         raise AssertionError(f"unexpected PATCH {url}")
 
-    with patch("requests.get", side_effect=get_side_effect), \
-         patch("requests.post", side_effect=post_side_effect), \
-         patch("requests.patch", side_effect=patch_side_effect):
+    # github_deployer talks to the GitHub API through a requests.Session
+    # (for connection pooling/retries), not the bare requests.get/post/patch
+    # module functions - patching those doesn't intercept session.get(...),
+    # so this test used to silently make a REAL call to api.github.com with
+    # the fake token "tok" and fail on the real 401 response instead of
+    # exercising the mocked stale-file-deletion behavior it's named for.
+    fake_session = MagicMock()
+    fake_session.get.side_effect = get_side_effect
+    fake_session.post.side_effect = post_side_effect
+    fake_session.patch.side_effect = patch_side_effect
+
+    with patch("app.deploy.github_deployer._get_session", return_value=fake_session):
         result = github_deployer.deploy(
             {"keep.txt": "still here"}, "myapp",
             token="tok", org="org", repo="repo",

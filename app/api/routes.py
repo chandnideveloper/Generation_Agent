@@ -18,9 +18,13 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-@router.get("/health")
 @router.get("/api/health")
 def health_endpoint():
+    # /health and / are owned by health() below (richer payload: targets,
+    # deploy readiness, mapping_api/output_dir). This route used to also
+    # claim /health with a shallower {"status": "ok"} body, and since it was
+    # registered first, FastAPI matched it before health() ever ran -
+    # silently shadowing the real health check and its `targets` field.
     return {"status": "ok", "service": "generation-agent"}
 
 

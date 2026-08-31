@@ -201,9 +201,19 @@ def build_visual(
     )
     is_extension = bool(source.get("is_extension") or "ext" in qlik_type.lower())
 
-    # Prioritize explicit visual_type specified in fabric mapping, otherwise resolve from catalog
+    # Prioritize explicit visual_type specified in fabric mapping, otherwise
+    # resolve from catalog. But an explicit type is only trustworthy when it
+    # doesn't require an AppSource custom visual this pipeline never
+    # registers (see CUSTOM_VISUAL_ONLY_TYPES) - mapping stages emit
+    # "boxPlot"/"sankeyDiagram" as if they were ordinary native types, which
+    # produces Fabric's "add this custom visual first" placeholder instead of
+    # a chart. In that case, defer to the catalog's own safe substitution
+    # (e.g. boxplot -> columnChart) instead of trusting the literal value.
     explicit_visual_type = text(fabric.get("visual_type"))
-    if explicit_visual_type:
+    requires_custom_visual = bool(fabric.get("requires_custom_visual")) or (
+        explicit_visual_type in visual_catalog.CUSTOM_VISUAL_ONLY_TYPES
+    )
+    if explicit_visual_type and not requires_custom_visual:
         visual_type = explicit_visual_type
         severity, reason, suggestion = "native", None, None
     else:

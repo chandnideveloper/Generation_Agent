@@ -160,6 +160,17 @@ MANUAL = {
 
 PLACEHOLDER = "textbox"
 
+# Fabric visual type names that only render if the target report explicitly
+# registers the matching AppSource custom visual package. This pipeline has
+# no such registration step (see app/report/report_files.py - it only ever
+# emits a BaseTheme resourcePackage), so trusting one of these at face value
+# produces Fabric/Power BI's "To see this custom visual, add it to this
+# report first" placeholder instead of a chart. Anything upstream (mapping)
+# that names one of these - whether via an explicit visual_type or its own
+# requires_custom_visual flag - must be routed through resolve() below for
+# its safe substitution rather than emitted as-is.
+CUSTOM_VISUAL_ONLY_TYPES = {"boxPlot", "sankeyDiagram"}
+
 
 def resolve(qlik_type: str, is_extension: bool = False) -> Tuple[str, str, Optional[str], Optional[str]]:
     """Return (visual_type, severity, reason, suggestion)."""

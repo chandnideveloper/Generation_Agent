@@ -51,12 +51,25 @@ def test_every_visual_json_is_well_formed(package):
 
 
 def test_visuals_stay_inside_the_canvas(package):
+    """Each page's own declared height (page.json) is the real bound - not
+    the fixed config.CANVAS_HEIGHT. build_report deliberately grows a page
+    taller than the nominal canvas for content-heavy Qlik sheets (setting
+    displayOption to FitToWidth in that case), so a visual is only actually
+    overflowing if it exceeds the height its own page declares.
+    """
     from app.config import config
+
+    page_heights = {
+        path.split("/pages/")[1].split("/")[0]: json.loads(content)["height"]
+        for path, content in package.items()
+        if path.endswith("/page.json")
+    }
 
     for path, document in _visuals(package).items():
         position = document["position"]
+        page_id = path.split("/pages/")[1].split("/")[0]
         assert position["x"] + position["width"] <= config.CANVAS_WIDTH, path
-        assert position["y"] + position["height"] <= config.CANVAS_HEIGHT, path
+        assert position["y"] + position["height"] <= page_heights[page_id], path
         assert position["width"] >= 40 and position["height"] >= 40, path
 
 
