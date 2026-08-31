@@ -65,7 +65,7 @@ import shutil
 def _win_safe_path(p: str) -> str:
     """Return a path that avoids Windows MAX_PATH (260 character) limitation."""
     abs_p = os.path.abspath(p)
-    if os.name == "nt" and not abs_p.startswith("\\\\?\\") and len(abs_p) > 200:
+    if os.name == "nt" and not abs_p.startswith("\\\\?\\"):
         return "\\\\?\\" + abs_p
     return abs_p
 

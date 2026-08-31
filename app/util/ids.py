@@ -70,10 +70,12 @@ def quote_dax_table(name: str) -> str:
     return quote_tmdl(name)
 
 
-def safe_filename(name: str, fallback: str = "item") -> str:
+def safe_filename(name: str, fallback: str = "item", max_len: int = 80) -> str:
     """Strip characters Windows and the Fabric API reject in a path."""
     cleaned = INVALID_PATH.sub("", str(name or "")).strip().strip(".")
     cleaned = cleaned.replace("\n", " ").strip()
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip()
     return cleaned or fallback
 
 
