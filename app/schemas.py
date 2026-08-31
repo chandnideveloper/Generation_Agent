@@ -101,10 +101,14 @@ class GenerateRequest(BaseModel):
             if o and not str(o).startswith("{{") and str(o).strip():
                 data["org"] = str(o).strip()
 
-            # Default push_only for cloud deployments
+            # Cloud deployments push straight to the destination by default,
+            # but every run still gets an on-disk artifact folder (see
+            # generator.py) so multi-datasource / multi-report runs stay
+            # inspectable after the fact — write_to_disk keeps its own
+            # model default (True) here and is only overridden if the
+            # caller explicitly opts out.
             if data.get("deploy") in ("fabric", "github", "devops") and "push_only" not in data:
                 data["push_only"] = True
-                data["write_to_disk"] = False
 
         return data
 

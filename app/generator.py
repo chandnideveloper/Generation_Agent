@@ -9,7 +9,10 @@ The artifacts are identical for `powerbi_desktop` and `fabric`; only the
 packaging and destination differ, so both targets share one code path.
 """
 
+import datetime
 import os
+import time
+import uuid
 from typing import Any, Dict
 
 from app.config import config
@@ -73,7 +76,19 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
     """Build (and optionally deploy) a Power BI package from a mapping result."""
     mapping = unwrap_mapping(mapping_document)
     identity = app_identity(mapping)
-    app_name = safe_filename(request.app_name or identity["app_name"], "QlikApp")
+
+    # 1. Fully dynamic app_name with timestamp fallback if missing
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    ts_str = now_utc.strftime("%Y%m%d-%H%M%S")
+    app_name_raw = request.app_name or identity.get("app_name") or f"App-{ts_str}"
+    app_name = safe_filename(app_name_raw, fallback=f"App-{ts_str}")
+
+    # 2. Fully dynamic run_id with timestamp + random entropy fallback if missing
+    run_id = (
+        request.run_id
+        or identity.get("run_id")
+        or f"run-{ts_str}-{uuid.uuid4().hex[:6]}"
+    )
 
     _log_action_sync("Generating Power BI TMDL model & semantic relationships", request, app_name, f"Starting generation for app {app_name}")
 
@@ -96,11 +111,18 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         _log_action_sync("Generated PBIR report files", request, app_name, f"Emitted {len(report_files)} report & visual files")
 
     package = pbip_packager.build_package(app_name, model_files, report_files)
-    run_id = request.run_id or identity["run_id"]
-    package_store.save(run_id, package, request.app_id or identity["app_id"])
+    package_store.save(run_id, package, request.app_id or identity.get("app_id"))
 
-    # Structural validation of the emitted package — the checks here are the
-    # ones that actually stop Desktop and Fabric opening a project.
+    # 3. UNCONDITIONAL DISK PERSISTENCE FOR EVERY RUN
+    # Every run is materialized under its own dynamic folder: generated/<app_name>/<run_id>/
+    destination = os.path.join(
+        config.OUTPUT_DIR,
+        slug(app_name, fallback=f"app-{ts_str}"),
+        slug(run_id, fallback=f"run-{ts_str}"),
+    )
+    disk_write_result = pbip_packager.write_to_disk(package, destination)
+
+    # 4. Structural validation of the emitted package
     validation = validator.validate(package, app_name)
 
     result: Dict[str, Any] = {
@@ -108,9 +130,10 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         "validation": validation,
         "target": request.target.value,
         "deploy": request.deploy.value,
-        "app_id": request.app_id or identity["app_id"],
+        "app_id": request.app_id or identity.get("app_id"),
         "app_name": app_name,
         "run_id": run_id,
+        "output_path": disk_write_result.get("output_path"),
         "file_count": len(package),
         "total_bytes": artifact_builder.measure(package)["total_bytes"],
         "summary": {"semantic_model": model_report, "report": report_stats},
@@ -119,15 +142,6 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
     }
 
     _log_action_sync("Created Fabric PBIP deployment package", request, app_name, f"Package created: {len(package)} files, {result['total_bytes']} bytes")
-
-    # Desktop needs the folder on disk; other targets only if asked; push_only
-    # overrides both — the package is already cached above for /download, and
-    # _deploy() below runs unconditionally, so push_only skips no real work.
-    if not request.push_only and (request.write_to_disk or request.target == Target.POWERBI_DESKTOP):
-        destination = os.path.join(
-            config.OUTPUT_DIR, slug(app_name), slug(run_id or "run")
-        )
-        result.update(pbip_packager.write_to_disk(package, destination))
 
     # Return the generated files themselves, not just counts, unless the
     # caller opted out (a large model's full text can dwarf the response).
@@ -141,11 +155,21 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
             result["report"] = tree.get("report", {})
 
     result["deployment"] = _deploy(package, app_name, request, result)
-    result["message"] = _message(result)
+
+    # Clearly reflect deployment outcome in top-level status and message
+    if result["deployment"].get("status") == "error":
+        result["status"] = "error"
+        result["message"] = f"Package generated locally, but deployment to {request.deploy.value} failed: {result['deployment'].get('error')}"
+    elif result["deployment"].get("status") == "success":
+        dep = result["deployment"]
+        items_desc = ", ".join(f"{k}: {v}" for k, v in dep.get("items", {}).items())
+        result["message"] = f"{_message(result)} | Successfully deployed to {request.deploy.value} ({items_desc})"
+    else:
+        result["message"] = _message(result)
 
     # Persist report generation result in MongoDB
     _save_to_mongodb(result, request, app_name)
-    _log_action_sync("Report generation completed successfully", request, app_name, f"Completed status={result['status']}, {len(package)} files")
+    _log_action_sync("Report generation completed", request, app_name, f"Completed status={result['status']}, {len(package)} files")
 
     return result
 
@@ -211,8 +235,22 @@ def _deploy(
 
     try:
         if request.deploy == Deploy.FABRIC:
+            ws = request.workspace_id
+            tok = request.fabric_access_token
+            if not ws or ws == "personal" or ws.startswith("{{"):
+                return {
+                    "status": "error",
+                    "provider": "fabric",
+                    "error": f"Invalid Fabric Workspace ID '{ws}'. Please specify a valid Fabric Workspace GUID (e.g. '4a212d5c-abf8-44ac-9cf5-7e47ed9aaf26') in fabric_group_id or workspace_id.",
+                }
+            if not tok or tok.startswith("{{"):
+                return {
+                    "status": "error",
+                    "provider": "fabric",
+                    "error": "Invalid Fabric Access Token: placeholder '{{FABRIC_ACCESS_TOKEN}}' was not set. Please provide a valid Bearer token for Microsoft Fabric.",
+                }
             return fabric_deployer.deploy(
-                package, app_name, request.workspace_id, request.fabric_access_token
+                package, app_name, ws, tok
             )
         if request.deploy == Deploy.GITHUB:
             return github_deployer.deploy(
