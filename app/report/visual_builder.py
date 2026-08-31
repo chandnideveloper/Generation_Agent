@@ -158,7 +158,20 @@ def _match_field(
             if col_match in column_home:
                 return (column_home[col_match], col_match, False)
 
-    return None
+def _parse_font_size(size_obj: Any) -> Optional[float]:
+    """Parse font size from float, int, str ('14pt', '14px', '14'), or dict ({'fixed': '14'})."""
+    if not size_obj:
+        return None
+    if isinstance(size_obj, dict):
+        raw = size_obj.get("fixed") or size_obj.get("size") or size_obj.get("fontSize") or size_obj.get("value")
+    else:
+        raw = size_obj
+    if raw is None or str(raw).lower() in ("auto", "none", "default", ""):
+        return None
+    try:
+        return float(str(raw).replace("pt", "").replace("px", "").strip())
+    except (ValueError, TypeError):
+        return None
 
 
 def build_visual(
@@ -327,13 +340,10 @@ def build_visual(
     title_color = text(formatting_dict.get("title_color") or style.get("title_color") or style.get("titleColor"))
     if title_color and title_color != "default":
         title_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{title_color}'"}}}}}
-    font_size = formatting_dict.get("title_font_size") or style.get("font_size") or style.get("fontSize")
-    if font_size and font_size != "auto":
-        try:
-            size_val = float(str(font_size).replace("pt", "").replace("px", "").strip())
-            title_props["fontSize"] = {"expr": {"Literal": {"Value": f"{size_val}D"}}}
-        except ValueError:
-            pass
+    
+    title_font_size = _parse_font_size(formatting_dict.get("title_font_size") or style.get("font_size") or style.get("fontSize"))
+    if title_font_size is not None:
+        title_props["fontSize"] = {"expr": {"Literal": {"Value": f"{title_font_size}D"}}}
 
     title_font = text(
         formatting_dict.get("title_font_family")
@@ -484,25 +494,25 @@ def build_visual(
         if val_font and val_font.lower() not in ("default", "none", "auto"):
             clean_vf = val_font.split(",")[0].strip().strip("'").strip('"')
             val_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_vf}'"}}}
-        if val_size and str(val_size) != "auto":
-            try:
-                vs = float(str(val_size).replace("pt", "").replace("px", "").strip())
-                if vs < 5:
-                    vs = vs * 45.0
-                val_props["fontSize"] = {"expr": {"Literal": {"Value": f"{vs}D"}}}
-            except ValueError:
-                pass
+        val_size = _parse_font_size(kpi_styling.get("value_font_size"))
+        if val_size is not None:
+            if val_size < 5:
+                val_size = val_size * 45.0
+            val_props["fontSize"] = {"expr": {"Literal": {"Value": f"{val_size}D"}}}
         if val_props:
             objects["valueLabel"] = [{"properties": val_props}]
 
         lbl_color = text(kpi_styling.get("label_color"))
         lbl_font = text(kpi_styling.get("label_font_family"))
+        lbl_size = _parse_font_size(kpi_styling.get("label_font_size"))
         lbl_props: Dict[str, Any] = {}
         if lbl_color and lbl_color.lower() not in ("default", "none", "auto"):
             lbl_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{lbl_color}'"}}}}}
         if lbl_font and lbl_font.lower() not in ("default", "none", "auto"):
             clean_lf = lbl_font.split(",")[0].strip().strip("'").strip('"')
             lbl_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_lf}'"}}}
+        if lbl_size is not None:
+            lbl_props["fontSize"] = {"expr": {"Literal": {"Value": f"{lbl_size}D"}}}
         if lbl_props:
             objects["categoryLabel"] = [{"properties": lbl_props}]
     elif single_color and single_color.lower() not in ("default", "none", "auto"):

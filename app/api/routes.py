@@ -18,6 +18,12 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+@router.get("/health")
+@router.get("/api/health")
+def health_endpoint():
+    return {"status": "ok", "service": "generation-agent"}
+
+
 @router.post("/generate", response_model=GenerateResponse)
 @router.post("/api/generate", response_model=GenerateResponse)
 @router.post("/generation", response_model=GenerateResponse)

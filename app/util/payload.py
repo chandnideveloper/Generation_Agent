@@ -25,10 +25,17 @@ def text(value: Any, default: str = "") -> str:
 
 
 def unwrap_mapping(document: Any) -> Dict[str, Any]:
-    """Accept a raw mapping result or a stored {mapping_result: ...} row."""
+    """Accept a raw mapping result or a stored {mapping_result: ...} / {parsing_result: ...} row."""
     doc = as_dict(document)
-    inner = doc.get("mapping_result")
-    return as_dict(inner) if isinstance(inner, dict) and inner else doc
+    if isinstance(doc.get("mapping_result"), dict) and doc["mapping_result"]:
+        return doc["mapping_result"]
+    if isinstance(doc.get("parsing_result"), dict) and doc["parsing_result"]:
+        res = dict(doc["parsing_result"])
+        for k in ("app_id", "app_name", "run_id", "space_id", "workspace_id", "source_type"):
+            if k in doc and k not in res:
+                res[k] = doc[k]
+        return res
+    return doc
 
 
 def app_identity(mapping: Dict[str, Any]) -> Dict[str, Any]:
