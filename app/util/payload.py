@@ -97,3 +97,8 @@ def connections(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(found, dict):
         found = [found]
     return [c for c in as_list(found) if isinstance(c, dict)]
+
+
+def data_files(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    found = mapping.get("data_files") or mapping.get("dataFiles") or []
+    return [f for f in as_list(found) if isinstance(f, dict)]

@@ -357,6 +357,23 @@ def _extract_mquery_from_payload(table: Dict[str, Any]) -> Optional[str]:
 SUPABASE_STORAGE_URL = "https://orcqwbokkvelxgmkagpz.supabase.co/storage/v1/object/public/migration-data-files"
 
 
+def clean_data_file_name(raw_file_name: str) -> str:
+    """QVD files migrated to cloud/Fabric are stored as CSV, so the M-query's
+    file reference must match the migrated extension, not the original one."""
+    return re.sub(r"\.qvd$", ".csv", raw_file_name.strip(), flags=re.IGNORECASE)
+
+
+def supabase_file_url(clean_file_name: str) -> str:
+    """The placeholder Supabase Storage URL a file-based table's M-query
+    points at when no real Fabric-hosted copy has been provisioned yet.
+
+    Exposed so app/generator.py can find-and-replace this exact URL with the
+    real OneLake location once a Fabric deploy has actually uploaded the
+    file there - see app/deploy/fabric_data_provisioner.py.
+    """
+    return f"{SUPABASE_STORAGE_URL}/{clean_file_name.replace(' ', '%20')}"
+
+
 M_TYPE_MAP = {
     "string": "type text",
     "dateTime": "type datetime",
@@ -379,10 +396,8 @@ def _fix_relative_folder_paths(mquery_str: str, table: Optional[Dict[str, Any]] 
     )
     if file_match and ("Folder.Files" in mquery_str or "File.Contents" in mquery_str or "Web.Contents" in mquery_str or ".qvd" in mquery_str.lower()):
         raw_file_name = file_match.group(1).strip()
-        # QVD files migrated to cloud/Fabric are stored as CSV in Supabase Storage
-        clean_file_name = re.sub(r"\.qvd$", ".csv", raw_file_name, flags=re.IGNORECASE)
-        encoded_name = clean_file_name.replace(" ", "%20")
-        supa_url = f"{SUPABASE_STORAGE_URL}/{encoded_name}"
+        clean_file_name = clean_data_file_name(raw_file_name)
+        supa_url = supabase_file_url(clean_file_name)
         new_source = f'    Source = Csv.Document(Web.Contents("{supa_url}"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.None])'
 
         # If table is provided, synchronize Changed Type with TMDL data types exactly

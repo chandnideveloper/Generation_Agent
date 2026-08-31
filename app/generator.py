@@ -18,7 +18,9 @@ from typing import Any, Dict
 
 from app.config import config
 from app.deploy import devops_deployer, fabric_deployer, github_deployer
+from app.deploy import fabric_data_provisioner
 from app.model.semantic_model import build_semantic_model
+from app.model.table_tmdl import supabase_file_url
 from app.package import artifacts as artifact_builder
 from app.package import package_store, pbip_packager, validator
 from app.report.report_writer import build_report
@@ -119,6 +121,32 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
 
     model_files, model_report = build_semantic_model(mapping, app_name)
     _log_action_sync("Generated Power BI TMDL model", request, app_name, f"Emitted {len(model_files)} TMDL model files")
+
+    # File-based (CSV/QVD) tables are built above pointing at a placeholder
+    # Supabase Storage URL (see table_tmdl.py) - real content only exists
+    # there if some other process happened to stage the exact filename.
+    # When actually deploying to Fabric with real credentials, and the
+    # mapping payload carries real downloaded file content (see
+    # az-qlikengine-api-repo's fetchDataFiles), upload each file into a
+    # Fabric Lakehouse now and rewrite the placeholder URL to the real
+    # OneLake location - a post-processing text swap rather than threading
+    # Fabric credentials through the TMDL builder itself, so this has zero
+    # effect on any run that isn't an authenticated Fabric deploy.
+    csv_data_files = P.data_files(mapping)
+    if request.deploy == Deploy.FABRIC and request.workspace_id and request.fabric_access_token and csv_data_files:
+        provisioned = fabric_data_provisioner.provision_data_files(
+            csv_data_files, request.workspace_id, request.fabric_access_token, f"{app_name}_DataFiles",
+        )
+        if provisioned:
+            for clean_name, onelake_url in provisioned.items():
+                placeholder = supabase_file_url(clean_name)
+                for path, content in list(model_files.items()):
+                    if placeholder in content:
+                        model_files[path] = content.replace(placeholder, onelake_url)
+            _log_action_sync(
+                "Provisioned CSV/file data into Fabric Lakehouse", request, app_name,
+                f"{len(provisioned)} file(s) uploaded and referenced in place of the Supabase placeholder",
+            )
 
     report_files: Dict[str, str] = {}
     notes = []
