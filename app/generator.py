@@ -48,13 +48,10 @@ logger = get_logger(__name__)
 _TELEMETRY_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-telemetry")
 
 
-def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple) -> None:
+def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (0.2, 0.5)) -> None:
     import requests
     bases = [
         "http://127.0.0.1:8008",
-        "http://localhost:8008",
-        "http://127.0.0.1:8005",
-        "http://localhost:8005",
         config.MONGO_API_URL,
     ]
     for base in bases:
