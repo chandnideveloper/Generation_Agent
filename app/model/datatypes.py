@@ -142,6 +142,9 @@ def format_string(column: Dict[str, Any], data_type: str) -> str:
     # left over from a type the pipeline corrected - drop it rather than
     # writing a nonsensical formatString into the TMDL.
     if explicit and explicit.lower() not in ("general text", "general", "none") and data_type not in ("string", "boolean"):
+        # If dataType is dateTime, do not apply a purely numeric pattern like '##############'
+        if data_type == "dateTime" and ("#" in explicit or "0" in explicit) and not any(c in explicit.lower() for c in ("y", "m", "d", "h", "s")):
+            return "General Date"
         return explicit
     if data_type == "dateTime":
         return "General Date"
