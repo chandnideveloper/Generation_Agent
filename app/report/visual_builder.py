@@ -159,7 +159,7 @@ def _match_field(
                 return (column_home[col_match], col_match, False)
 
 def _parse_font_size(size_obj: Any) -> Optional[float]:
-    """Parse font size from float, int, str ('14pt', '14px', '14'), or dict ({'fixed': '14'})."""
+    """Parse font size from float, int, str ('14pt', '14px', '14', 'M'), or dict ({'fixed': '14'})."""
     if not size_obj:
         return None
     if isinstance(size_obj, dict):
@@ -168,6 +168,10 @@ def _parse_font_size(size_obj: Any) -> Optional[float]:
         raw = size_obj
     if raw is None or str(raw).lower() in ("auto", "none", "default", ""):
         return None
+    raw_str = str(raw).strip().lower()
+    tshirt_map = {"xs": 9.0, "s": 11.0, "small": 11.0, "m": 14.0, "medium": 14.0, "l": 18.0, "large": 18.0, "xl": 24.0, "xxl": 36.0}
+    if raw_str in tshirt_map:
+        return tshirt_map[raw_str]
     try:
         return float(str(raw).replace("pt", "").replace("px", "").strip())
     except (ValueError, TypeError):
