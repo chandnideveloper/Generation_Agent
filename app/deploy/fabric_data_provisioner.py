@@ -157,6 +157,30 @@ def provision_data_files(
             logger.warning("Failed to upload data file '%s' to Fabric Lakehouse: %s", clean_name, exc)
             continue
         resolved[clean_name] = onelake_file_url(workspace_id, lakehouse_id, clean_name)
-        logger.info("Uploaded data file '%s' to Fabric Lakehouse '%s'", clean_name, lakehouse_name)
-
     return resolved
+
+
+def rewrite_package_data_file_urls(
+    package: Dict[str, str], uploaded_urls: Dict[str, str]
+) -> Dict[str, str]:
+    """Rewrite any M-query pointing at the placeholder Supabase Storage URL
+    to the newly-provisioned Fabric Lakehouse OneLake URL instead."""
+    if not uploaded_urls:
+        return package
+
+    from app.model.table_tmdl import SUPABASE_STORAGE_URL
+
+    rewritten: Dict[str, str] = {}
+    for path, content in package.items():
+        if not path.endswith((".tmdl", ".json", ".m")):
+            rewritten[path] = content
+            continue
+
+        updated = content
+        for clean_name, onelake_url in uploaded_urls.items():
+            old_url = f"{SUPABASE_STORAGE_URL}/{clean_name}"
+            if old_url in updated:
+                updated = updated.replace(old_url, onelake_url)
+        rewritten[path] = updated
+
+    return rewritten

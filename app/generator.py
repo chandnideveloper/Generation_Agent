@@ -14,7 +14,7 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from app.config import config
 from app.deploy import devops_deployer, fabric_deployer, github_deployer
@@ -244,7 +244,7 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
             "Starting deployment", request, app_name,
             f"target={request.deploy.value}, workspace={request.workspace_id or request.space_id}",
         )
-    result["deployment"] = _deploy(package, app_name, request, result)
+    result["deployment"] = _deploy(package, app_name, request, result, mapping=mapping)
     if request.deploy != Deploy.NONE:
         dep_status = result["deployment"].get("status", "unknown")
         _log_action_sync(
@@ -301,7 +301,11 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
 
 
 def _deploy(
-    package: Dict[str, str], app_name: str, request: GenerateRequest, result: Dict[str, Any]
+    package: Dict[str, str],
+    app_name: str,
+    request: GenerateRequest,
+    result: Dict[str, Any],
+    mapping: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the requested deployment. Failures are reported, not raised."""
     if request.deploy == Deploy.NONE:
@@ -330,6 +334,7 @@ def _deploy(
                     "provider": "fabric",
                     "error": "Invalid Fabric Access Token: placeholder '{{FABRIC_ACCESS_TOKEN}}' was not set. Please provide a valid Bearer token for Microsoft Fabric.",
                 }
+
             return fabric_deployer.deploy(
                 package, app_name, ws, tok
             )
