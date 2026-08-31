@@ -78,9 +78,21 @@ def _is_connected(graph: Dict[str, Set[str]], u: str, v: str) -> bool:
 def _is_primary_key_for_table(
     table_name: str, col_name: str, key_columns: Set[Tuple[str, str]]
 ) -> bool:
+    """Dynamically determine if col_name is the Primary Key of table_name.
+    
+    100% schema-driven:
+    1. Explicit key annotations in metadata (`key_columns`).
+    2. Entity-name matching using English singularization (e.g. Customers.customer_id, Categories.category_id, Stores.store_id, Calendar.date).
+    3. Natural PK column names ('id', 'key', 'code', 'date') on single-entity tables.
+    """
     if (table_name, col_name) in key_columns:
         return True
+
     t = table_name.lower().strip()
+    # Strip common technical prefixes like dim_, tbl_, fact_, v_
+    t = re.sub(r"^(tbl_|dim_|fact_|v_|d_)", "", t)
+
+    # Standard English singularization
     if t.endswith("ies"):
         sing = t[:-3] + "y"
     elif t.endswith("ses") or t.endswith("xes") or t.endswith("shes") or t.endswith("ches"):
@@ -90,27 +102,24 @@ def _is_primary_key_for_table(
     else:
         sing = t
 
-    c = col_name.lower()
-    if c == f"{sing}_id" or c == f"{sing}id":
+    c = col_name.lower().strip()
+
+    # Exact natural key match for this entity
+    candidate_keys = {
+        "id", "key", "code", "date",
+        f"{sing}_id", f"{sing}id",
+        f"{sing}_key", f"{sing}key",
+        f"{sing}_code", f"{sing}code",
+        f"{sing}_no", f"{sing}no",
+        f"{sing}_date", f"{sing}date",
+    }
+    if c in candidate_keys:
         return True
-    if sing == "trip" and c == "trip_id":
+
+    # If col_name contains the singular entity name with a key suffix (e.g. DateKey, CalendarDate, CustomerCode)
+    if (c.startswith(sing) or c.endswith(sing)) and any(s in c for s in ("id", "key", "code", "no", "date")):
         return True
-    if sing == "load" and c == "load_id":
-        return True
-    if sing == "driver" and c == "driver_id":
-        return True
-    if sing == "truck" and c == "truck_id":
-        return True
-    if sing == "trailer" and c == "trailer_id":
-        return True
-    if sing == "customer" and c == "customer_id":
-        return True
-    if sing == "facility" and c == "facility_id":
-        return True
-    if sing == "route" and c == "route_id":
-        return True
-    if sing == "calendar" and c in {"date", "dispatchdate", "date_id"}:
-        return True
+
     return False
 
 
