@@ -28,11 +28,54 @@ from app.util.payload import app_identity, unwrap_mapping
 logger = get_logger(__name__)
 
 
+def _log_action_sync(action: str, request: GenerateRequest, app_name: str, details: str = "") -> None:
+    """Log an agent action to MongoDB agent_actions collection."""
+    import requests
+    run_id = request.run_id or "unknown"
+    workspace_id = request.workspace_id or request.space_id or "personal"
+    app_id = request.app_id or "unknown"
+    payload = {
+        "agent_name": "Generation Agent",
+        "activity_summary": action,
+        "action": action,
+        "details": details or action,
+        "run_id": run_id,
+        "run_no": run_id,
+        "correlation_id": run_id,
+        "app_id": app_id,
+        "workbook_id": app_id,
+        "workspace_id": workspace_id,
+        "project_id": workspace_id,
+        "project_name": app_name or "Unknown",
+        "type": "agent_activity",
+        "status": "success",
+    }
+    bases = [
+        "http://127.0.0.1:8008",
+        "http://localhost:8008",
+        "http://127.0.0.1:8005",
+        "http://localhost:8005",
+        config.MONGO_API_URL,
+    ]
+    for base in bases:
+        if not base:
+            continue
+        try:
+            url = f"{base.rstrip('/')}/agent-actions"
+            res = requests.post(url, json=payload, timeout=(1, 3))
+            if res.status_code in (200, 201):
+                return
+        except Exception:
+            pass
+
+
 def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict[str, Any]:
     """Build (and optionally deploy) a Power BI package from a mapping result."""
     mapping = unwrap_mapping(mapping_document)
     identity = app_identity(mapping)
     app_name = safe_filename(request.app_name or identity["app_name"], "QlikApp")
+
+    _log_action_sync("Generating Power BI TMDL model & semantic relationships", request, app_name, f"Starting generation for app {app_name}")
 
     if request.offline_sample_data:
         from app.model import offline_source
@@ -40,15 +83,17 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         mapping["tables"] = offline_source.apply(P.tables(mapping))
 
     model_files, model_report = build_semantic_model(mapping, app_name)
-
+    _log_action_sync("Generated Power BI TMDL model", request, app_name, f"Emitted {len(model_files)} TMDL model files")
 
     report_files: Dict[str, str] = {}
     notes = []
     report_stats: Dict[str, Any] = {}
     if request.target != Target.SEMANTIC_MODEL_ONLY:
+        _log_action_sync("Generating PBIR visual layout & JSON definitions", request, app_name, "Building PBIR visual definitions")
         report_files, notes, report_stats = build_report(
             mapping, app_name, f"../{app_name}.SemanticModel"
         )
+        _log_action_sync("Generated PBIR report files", request, app_name, f"Emitted {len(report_files)} report & visual files")
 
     package = pbip_packager.build_package(app_name, model_files, report_files)
     run_id = request.run_id or identity["run_id"]
@@ -72,6 +117,8 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         "visual_notes": notes,
         "deployment": {},
     }
+
+    _log_action_sync("Created Fabric PBIP deployment package", request, app_name, f"Package created: {len(package)} files, {result['total_bytes']} bytes")
 
     # Desktop needs the folder on disk; other targets only if asked; push_only
     # overrides both — the package is already cached above for /download, and
@@ -98,6 +145,7 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
 
     # Persist report generation result in MongoDB
     _save_to_mongodb(result, request, app_name)
+    _log_action_sync("Report generation completed successfully", request, app_name, f"Completed status={result['status']}, {len(package)} files")
 
     return result
 

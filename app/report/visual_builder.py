@@ -319,14 +319,15 @@ def build_visual(
     
     # 1. Title styling
     style = as_dict(source.get("style")) or as_dict(fabric.get("style"))
+    formatting_dict = as_dict(source.get("formatting")) or as_dict(fabric.get("formatting"))
     title_props: Dict[str, Any] = {
         "text": {"expr": {"Literal": {"Value": f"'{title}'"}}},
         "show": {"expr": {"Literal": {"Value": "true"}}},
     }
-    title_color = text(style.get("title_color") or style.get("titleColor"))
+    title_color = text(formatting_dict.get("title_color") or style.get("title_color") or style.get("titleColor"))
     if title_color and title_color != "default":
         title_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{title_color}'"}}}}}
-    font_size = style.get("font_size") or style.get("fontSize")
+    font_size = formatting_dict.get("title_font_size") or style.get("font_size") or style.get("fontSize")
     if font_size and font_size != "auto":
         try:
             size_val = float(str(font_size).replace("pt", "").replace("px", "").strip())
@@ -334,9 +335,32 @@ def build_visual(
         except ValueError:
             pass
 
+    title_font = text(
+        formatting_dict.get("title_font_family")
+        or style.get("title_font_family")
+        or style.get("font_family")
+        or style.get("fontFamily")
+    )
+    if title_font and title_font.lower() not in ("default", "none", "auto"):
+        clean_font = title_font.split(",")[0].strip().strip("'").strip('"')
+        title_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_font}'"}}}
+
     objects: Dict[str, Any] = {
         "title": [{"properties": title_props}]
     }
+
+    # ── legend styling ───────────────────────────────────────────────────────
+    legend_cfg = as_dict(formatting_dict.get("legend"))
+    if visual_type in ("pieChart", "donutChart", "lineChart", "barChart", "columnChart", "clusteredBarChart", "clusteredColumnChart", "lineClusteredColumnComboChart", "comboChart"):
+        show_legend = legend_cfg.get("show", True)
+        legend_props: Dict[str, Any] = {
+            "show": {"expr": {"Literal": {"Value": "true" if show_legend else "false"}}}
+        }
+        dock = str(legend_cfg.get("dock", "auto")).lower()
+        pos_map = {"top": "'Top'", "bottom": "'Bottom'", "left": "'Left'", "right": "'Right'"}
+        if dock in pos_map:
+            legend_props["position"] = {"expr": {"Literal": {"Value": pos_map[dock]}}}
+        objects["legend"] = [{"properties": legend_props}]
 
     # ── slicer: add slicerSettings ────────────────────────────────────────────
     if visual_type == "slicer":
@@ -449,19 +473,44 @@ def build_visual(
             }
         }]
 
-    if single_color and single_color.lower() not in ("default", "none", "auto"):
-        if visual_type == "card":
-            objects["valueLabel"] = [{
-                "properties": {
-                    "fontColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{single_color}'"}}}}}
-                }
-            }]
-        else:
-            objects["dataPoint"] = [{
-                "properties": {
-                    "fill": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{single_color}'"}}}}}
-                }
-            }]
+    kpi_styling = as_dict(source.get("kpi_styling")) or as_dict(fabric.get("kpi_styling"))
+    if visual_type == "card":
+        val_color = text(kpi_styling.get("value_color") or single_color)
+        val_size = kpi_styling.get("value_font_size")
+        val_font = text(kpi_styling.get("value_font_family"))
+        val_props: Dict[str, Any] = {}
+        if val_color and val_color.lower() not in ("default", "none", "auto"):
+            val_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{val_color}'"}}}}}
+        if val_font and val_font.lower() not in ("default", "none", "auto"):
+            clean_vf = val_font.split(",")[0].strip().strip("'").strip('"')
+            val_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_vf}'"}}}
+        if val_size and str(val_size) != "auto":
+            try:
+                vs = float(str(val_size).replace("pt", "").replace("px", "").strip())
+                if vs < 5:
+                    vs = vs * 45.0
+                val_props["fontSize"] = {"expr": {"Literal": {"Value": f"{vs}D"}}}
+            except ValueError:
+                pass
+        if val_props:
+            objects["valueLabel"] = [{"properties": val_props}]
+
+        lbl_color = text(kpi_styling.get("label_color"))
+        lbl_font = text(kpi_styling.get("label_font_family"))
+        lbl_props: Dict[str, Any] = {}
+        if lbl_color and lbl_color.lower() not in ("default", "none", "auto"):
+            lbl_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{lbl_color}'"}}}}}
+        if lbl_font and lbl_font.lower() not in ("default", "none", "auto"):
+            clean_lf = lbl_font.split(",")[0].strip().strip("'").strip('"')
+            lbl_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_lf}'"}}}
+        if lbl_props:
+            objects["categoryLabel"] = [{"properties": lbl_props}]
+    elif single_color and single_color.lower() not in ("default", "none", "auto"):
+        objects["dataPoint"] = [{
+            "properties": {
+                "fill": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{single_color}'"}}}}}
+            }
+        }]
 
     # 4. Reference lines
     ref_lines = (
