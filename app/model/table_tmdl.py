@@ -29,15 +29,26 @@ def _column_name(column: Dict[str, Any]) -> str:
 
 
 def _is_calculated(
-    column: Dict[str, Any], extracted_exprs: Optional[Dict[str, str]] = None
+    column: Dict[str, Any],
+    extracted_exprs: Optional[Dict[str, str]] = None,
+    table_name: Optional[str] = None,
 ) -> bool:
     name = _column_name(column)
     if extracted_exprs and name.lower() in extracted_exprs:
+        qlik_expr = extracted_exprs[name.lower()]
+        translated = _qlik_expr_to_dax(qlik_expr, table_name or "Table") if table_name else ""
+        if not translated or translated.strip().lower() in (
+            f"'{table_name}'[{name}]".lower(), f"[{name}]".lower(), "blank()"
+        ):
+            return False
         return True
     fabric = as_dict(column.get("fabric"))
     if column.get("is_calculated") or column.get("isCalculated") or fabric.get("is_calculated"):
         return True
-    if column.get("dax_expression") or column.get("qlik_expression") or fabric.get("dax_expression"):
+    dax_expr = column.get("dax_expression") or fabric.get("dax_expression")
+    if dax_expr and not str(dax_expr).strip().lower() in (
+        f"'{table_name}'[{name}]".lower(), f"[{name}]".lower(), "blank()", "=blank()"
+    ):
         return True
     data_type_raw = text(
         column.get("qlik_datatype") or column.get("fabric_datatype") or column.get("dataType") or column.get("type") or ""
@@ -51,33 +62,30 @@ def _extract_column_expressions(qlik_query: str) -> Dict[str, str]:
     """Parse `expr as Alias` from Qlik load script dynamically.
 
     Skips in-place transforms where the alias equals the source column
-    (e.g. ``Upper(Trim(home_terminal)) as home_terminal``).  These are
-    simple data-cleansing ops that map 1-to-1 to the physical column
+    (e.g. ``Upper(Trim(home_terminal)) as home_terminal`` or ``Date(Floor(DispatchDate)) as DispatchDate``).
+    These are simple data-cleansing ops that map 1-to-1 to the physical column
     and must NOT become calculated columns — otherwise Power BI sees a
     duplicate column name error.
     """
     if not qlik_query:
         return {}
     results = {}
-    pattern = r"((?:If|Date|Month|MonthStart|MonthName|Year|Week|Num|ApplyMap|Upper|Lower|Trim|Text|Dual)\s*\([\s\S]+?\))\s+as\s+([A-Za-z0-9_#]+)"
+    pattern = r"((?:If|Date|Date#|Timestamp|Month|MonthStart|MonthName|Year|Week|Num|ApplyMap|Upper|Lower|Trim|Text|Dual|Floor|Ceil|Round)\s*\([\s\S]+?\))\s+as\s+([A-Za-z0-9_#]+)"
     for match in re.finditer(pattern, qlik_query, re.IGNORECASE):
         expr, alias = match.group(1).strip(), match.group(2).strip()
 
-        # Detect in-place transforms: if the expression only wraps the
-        # alias column itself (Upper/Lower/Trim nesting), skip it.
-        # e.g. Upper(Trim(home_terminal)) as home_terminal
-        inner = expr
-        while True:
-            m = re.match(
-                r"(?:upper|lower|trim)\s*\(\s*(.+?)\s*\)\s*$",
-                inner, re.IGNORECASE,
-            )
-            if m:
-                inner = m.group(1).strip()
-            else:
-                break
-        if inner.lower() == alias.lower():
-            # Pure in-place transform — keep as physical sourceColumn
+        # Detect in-place transforms: find identifiers in expr
+        inner_identifiers = set(re.findall(r"\b([A-Za-z0-9_#]+)\b", expr, re.IGNORECASE))
+        clean_identifiers = {
+            ident.lower() for ident in inner_identifiers
+            if ident.lower() not in DAX_KEYWORD_FUNCTIONS and ident.lower() not in {
+                "date", "date#", "timestamp", "month", "monthstart", "monthname", "year", "week", "num",
+                "applymap", "upper", "lower", "trim", "text", "dual", "floor", "ceil", "round",
+                "resident", "where", "group", "by", "order", "as", "load", "sql", "select", "from"
+            }
+        }
+        # If the only referenced column inside the expression is the alias itself, it's an in-place transform!
+        if clean_identifiers == {alias.lower()}:
             continue
 
         results[alias.lower()] = expr
@@ -198,7 +206,9 @@ def build_column(
     source = text(column.get("source_column") or column.get("qlik_column_name"), name)
 
     lines: List[str] = []
-    if _is_calculated(column, extracted_exprs):
+    is_calc = _is_calculated(column, extracted_exprs, table_name=table)
+    dax_expr = ""
+    if is_calc:
         fabric = as_dict(column.get("fabric"))
         dax_expr = text(column.get("dax_expression") or fabric.get("dax_expression"))
         if not dax_expr or dax_expr.startswith("="):
@@ -208,10 +218,13 @@ def build_column(
             if qlik_expr:
                 dax_expr = _qlik_expr_to_dax(qlik_expr, table)
 
-        if dax_expr and not dax_expr.startswith("="):
-            lines.append(f"{INDENT}column {quote_tmdl(name)} = {dax_expr}")
-        else:
-            lines.append(f"{INDENT}column {quote_tmdl(name)} = BLANK()")
+        if not dax_expr or dax_expr.strip().lower() in (
+            f"'{table}'[{name}]".lower(), f"[{name}]".lower(), "blank()"
+        ):
+            is_calc = False
+
+    if is_calc and dax_expr and not dax_expr.startswith("="):
+        lines.append(f"{INDENT}column {quote_tmdl(name)} = {dax_expr}")
         lines.append(f"{INDENT*2}dataType: {data_type}")
         lines.append(f"{INDENT*2}lineageTag: {lineage_tag(f'col:{table}.{name}')}")
         lines.append(f"{INDENT*2}summarizeBy: {summarize_by(data_type, is_key, col_name=name)}")
@@ -223,7 +236,6 @@ def build_column(
         lines.append(f"{INDENT*2}lineageTag: {lineage_tag(f'col:{table}.{name}')}")
         lines.append(f"{INDENT*2}summarizeBy: {summarize_by(data_type, is_key, col_name=name)}")
         lines.append(f"{INDENT*2}sourceColumn: {source}")
-
 
     fmt = format_string(column, data_type)
     if fmt:
