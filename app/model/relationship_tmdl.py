@@ -111,8 +111,6 @@ def _is_primary_key_for_table(
         return True
     if sing == "calendar" and c in {"date", "dispatchdate", "date_id"}:
         return True
-    if "performance" in sing and (c.endswith("_id") or c.endswith("id")):
-        return True
     return False
 
 
