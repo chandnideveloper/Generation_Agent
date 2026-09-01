@@ -1,5 +1,6 @@
 """Per-table TMDL: columns, partition and the M query behind it."""
 
+import os
 import re
 from typing import Any, Dict, List, Optional, Set
 
@@ -248,21 +249,32 @@ def build_column(
     return "\n".join(lines)
 
 
+def _bq_m_query(ep: str, q: str) -> str:
+    proj_clause = f'[BillingProject="{ep}"]' if ep else ''
+    return f'let\n    Source = GoogleBigQuery.Database({proj_clause}),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'
+
+
 CONNECTOR_M_FUNCTIONS = {
-    "redshift": ("AmazonRedshift.Database", lambda ep, db, sch, q: f'let\n    Source = AmazonRedshift.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
-    "snowflake": ("Snowflake.Databases", lambda ep, db, sch, q: f'let\n    Source = Snowflake.Databases("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "postgres": ("PostgreSQL.Database", lambda ep, db, sch, q: f'let\n    Source = PostgreSQL.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "postgresql": ("PostgreSQL.Database", lambda ep, db, sch, q: f'let\n    Source = PostgreSQL.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "sqlserver": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "mssql": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "sql": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "mysql": ("MySQL.Database", lambda ep, db, sch, q: f'let\n    Source = MySQL.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "oracle": ("Oracle.Database", lambda ep, db, sch, q: f'let\n    Source = Oracle.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "bigquery": ("GoogleBigQuery.Database", lambda ep, db, sch, q: f'let\n    Source = GoogleBigQuery.Database(),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "databricks": ("Databricks.Catalogs", lambda ep, db, sch, q: f'let\n    Source = Databricks.Catalogs("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "teradata": ("Teradata.Database", lambda ep, db, sch, q: f'let\n    Source = Teradata.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "hana": ("SapHana.Database", lambda ep, db, sch, q: f'let\n    Source = SapHana.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
-    "synapse": ("AzureSynapse.Database", lambda ep, db, sch, q: f'let\n    Source = AzureSynapse.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}")\nin\n    Result'),
+    "redshift": ("AmazonRedshift.Database", lambda ep, db, sch, q: f'let\n    Source = AmazonRedshift.Database("{ep}", "{db or "dev"}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "amazonredshift": ("AmazonRedshift.Database", lambda ep, db, sch, q: f'let\n    Source = AmazonRedshift.Database("{ep}", "{db or "dev"}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "snowflake": ("Snowflake.Databases", lambda ep, db, sch, q: f'let\n    Source = Snowflake.Databases("{ep}", "{db or "COMPUTE_WH"}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "postgres": ("PostgreSQL.Database", lambda ep, db, sch, q: f'let\n    Source = PostgreSQL.Database("{ep}", "{db or "postgres"}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "postgresql": ("PostgreSQL.Database", lambda ep, db, sch, q: f'let\n    Source = PostgreSQL.Database("{ep}", "{db or "postgres"}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "sqlserver": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "mssql": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "sql": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "azure_sql": ("Sql.Database", lambda ep, db, sch, q: f'let\n    Source = Sql.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "mysql": ("MySQL.Database", lambda ep, db, sch, q: f'let\n    Source = MySQL.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "oracle": ("Oracle.Database", lambda ep, db, sch, q: f'let\n    Source = Oracle.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "bigquery": ("GoogleBigQuery.Database", lambda ep, db, sch, q: _bq_m_query(ep, q)),
+    "gbq": ("GoogleBigQuery.Database", lambda ep, db, sch, q: _bq_m_query(ep, q)),
+    "google_bigquery": ("GoogleBigQuery.Database", lambda ep, db, sch, q: _bq_m_query(ep, q)),
+    "googlebigquery": ("GoogleBigQuery.Database", lambda ep, db, sch, q: _bq_m_query(ep, q)),
+    "databricks": ("Databricks.Catalogs", lambda ep, db, sch, q: f'let\n    Source = Databricks.Catalogs("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "teradata": ("Teradata.Database", lambda ep, db, sch, q: f'let\n    Source = Teradata.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "hana": ("SapHana.Database", lambda ep, db, sch, q: f'let\n    Source = SapHana.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "saphana": ("SapHana.Database", lambda ep, db, sch, q: f'let\n    Source = SapHana.Database("{ep}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
+    "synapse": ("AzureSynapse.Database", lambda ep, db, sch, q: f'let\n    Source = AzureSynapse.Database("{ep}", "{db}"),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'),
 }
 
 
@@ -321,8 +333,19 @@ def _format_m_steps(steps: List[str]) -> str:
 
 
 
-def _extract_mquery_from_payload(table: Dict[str, Any]) -> Optional[str]:
+def _is_circular_self_reference(mquery_str: str, table_name: str) -> bool:
+    """Detect if an M query references the table itself as its only source,
+    which causes 'Circular query chain present' errors in Power BI / Fabric."""
+    if not mquery_str or not table_name:
+        return False
+    clean_tn = _clean_table_name(table_name).strip()
+    pattern = rf'^\s*Source\s*=\s*(?:#"{re.escape(clean_tn)}"|{re.escape(clean_tn)})\s*,?$'
+    return bool(re.search(pattern, mquery_str, re.MULTILINE | re.IGNORECASE))
+
+
+def _extract_mquery_from_payload(table: Dict[str, Any], table_name: str = "") -> Optional[str]:
     fabric = as_dict(table.get("fabric"))
+    t_name = table_name or text(table.get("name") or table.get("table_name"))
     candidates = [
         table.get("m_query"),
         table.get("mquery"),
@@ -344,17 +367,25 @@ def _extract_mquery_from_payload(table: Dict[str, Any]) -> Optional[str]:
             if step_contents:
                 formatted = _format_m_steps(step_contents)
                 if formatted and not re.search(r"Table\.FromRows\(\s*\{\s*\}\s*,", formatted):
-                    return _fix_relative_folder_paths(formatted, table)
+                    if not _is_circular_self_reference(formatted, t_name):
+                        return _fix_relative_folder_paths(formatted, table)
         elif isinstance(c, str) and c.strip():
             raw_str = c.strip()
             if not re.search(r"Table\.FromRows\(\s*\{\s*\}\s*,", raw_str):
                 if not raw_str.lower().startswith("let") and "=" in raw_str:
-                    return _fix_relative_folder_paths(_format_m_steps(raw_str.splitlines()), table)
-                return _fix_relative_folder_paths(raw_str, table)
+                    formatted = _format_m_steps(raw_str.splitlines())
+                    if not _is_circular_self_reference(formatted, t_name):
+                        return _fix_relative_folder_paths(formatted, table)
+                elif not _is_circular_self_reference(raw_str, t_name):
+                    return _fix_relative_folder_paths(raw_str, table)
     return None
 
 
-SUPABASE_STORAGE_URL = "https://orcqwbokkvelxgmkagpz.supabase.co/storage/v1/object/public/migration-data-files"
+SUPABASE_STORAGE_URL = (
+    os.getenv("SUPABASE_STORAGE_URL")
+    or os.getenv("DATA_FILES_STORAGE_URL")
+    or "https://orcqwbokkvelxgmkagpz.supabase.co/storage/v1/object/public/migration-data-files"
+)
 
 
 def clean_data_file_name(raw_file_name: str) -> str:
@@ -440,14 +471,19 @@ def _fix_relative_folder_paths(mquery_str: str, table: Optional[Dict[str, Any]] 
 
 
 
-def _mquery(table: Dict[str, Any], name: str) -> str:
+def _mquery(
+    table: Dict[str, Any],
+    name: str,
+    valid_table_names: Optional[Set[str]] = None,
+    extracted_exprs: Optional[Dict[str, str]] = None,
+) -> str:
     """The Power Query behind the partition.
 
     Dynamically uses mquery or custom SQL from the mapping document,
     or generates native connector queries for Redshift, SQL Server, Snowflake, etc.
     """
     # 1. Prioritize explicit M-query from mapping payload if present
-    extracted_m = _extract_mquery_from_payload(table)
+    extracted_m = _extract_mquery_from_payload(table, name)
     if extracted_m:
         return extracted_m
 
@@ -458,8 +494,15 @@ def _mquery(table: Dict[str, Any], name: str) -> str:
         match = re.search(r"resident\s+([A-Za-z0-9_\-]+)", qlik_query, re.IGNORECASE)
         if match:
             upstream = _clean_table_name(match.group(1))
-            if upstream != name:
-                cols = [text(c.get("fabric_column_name") or c.get("name")) for c in as_list(table.get("columns")) if isinstance(c, dict)]
+            # Only reference upstream if it actually exists in the semantic model tables
+            is_valid_upstream = (valid_table_names is None) or (upstream in valid_table_names)
+            if upstream != name and is_valid_upstream:
+                # Select only physical columns (not calculated columns)
+                cols = [
+                    text(c.get("fabric_column_name") or c.get("name"))
+                    for c in as_list(table.get("columns"))
+                    if isinstance(c, dict) and not _is_calculated(c, extracted_exprs, table_name=name)
+                ]
                 cols_str = ", ".join(f'"{c}"' for c in cols if c)
                 if cols_str:
                     return f'let\n    Source = #"{upstream}",\n    SelectedColumns = Table.SelectColumns(Source, {{{cols_str}}})\nin\n    SelectedColumns'
@@ -496,19 +539,53 @@ def _mquery(table: Dict[str, Any], name: str) -> str:
 
     for token, (func_name, generator_fn) in CONNECTOR_M_FUNCTIONS.items():
         if token in driver:
+            if any(bq in token for bq in ["bigquery", "gbq"]):
+                project = conn.get("project") or ""
+                if not project and custom_sql:
+                    bq_match = re.search(r"FROM\s+`([a-zA-Z0-9_\-]+)`", custom_sql, re.IGNORECASE)
+                    if bq_match:
+                        project = bq_match.group(1)
+                if not project and conn.get("name"):
+                    bq_match = re.search(r"(?:google_?bigquery_|gbq_)([a-zA-Z0-9_\-]+)", conn.get("name", ""), re.IGNORECASE)
+                    if bq_match:
+                        project = bq_match.group(1)
+                return generator_fn(project, database or "", schema or "", query_str)
             endpoint = f"{server}:{port}" if port and port not in server else server
             if endpoint:
                 return generator_fn(endpoint, database or "", schema or "", query_str)
+
+    # Dialect-based fallback if driver was omitted but custom_sql is present
+    if custom_sql:
+        if "`" in custom_sql and re.search(r"FROM\s+`[a-zA-Z0-9_\-]+`\.`[a-zA-Z0-9_\-]+`", custom_sql, re.IGNORECASE):
+            project = conn.get("project") or ""
+            if not project:
+                m = re.search(r"FROM\s+`([a-zA-Z0-9_\-]+)`", custom_sql)
+                if m:
+                    project = m.group(1)
+            return CONNECTOR_M_FUNCTIONS["bigquery"][1](project, database or "", schema or "", query_str)
+        elif server and ("redshift" in server.lower() or port == "5439"):
+            endpoint = f"{server}:{port}" if port and port not in server else server
+            return CONNECTOR_M_FUNCTIONS["redshift"][1](endpoint, database or "dev", schema or "", query_str)
 
     if server and database:
         endpoint = f"{server}:{port}" if port and port not in server else server
         return f'let\n    Source = Sql.Database("{endpoint}", "{database}"),\n    Result = Value.NativeQuery(Source, "{query_str}")\nin\n    Result'
 
-    return f'let\n    Source = Table.FromRows({{}}, {{"{name}"}})\nin\n    Source'
+    # Filter columns to only physical columns (never include DAX calculated columns in #table)
+    cols = [
+        text(c.get("fabric_column_name") or c.get("name"))
+        for c in as_list(table.get("columns"))
+        if isinstance(c, dict) and not _is_calculated(c, extracted_exprs, table_name=name)
+    ]
+    cols = [c for c in cols if c]
+    if cols:
+        cols_str = ", ".join(f'"{c}"' for c in cols)
+        return f'let\n    Source = #table({{{cols_str}}}, {{}})\nin\n    Source'
+    return f'let\n    Source = #table({{"{name}"}}, {{}})\nin\n    Source'
 
 
 
-def build_table(table: Dict[str, Any]) -> str:
+def build_table(table: Dict[str, Any], valid_table_names: Optional[Set[str]] = None) -> str:
     """A complete table.tmdl document."""
     raw_name = text(table.get("name") or table.get("table_name"), "Table")
     name = _clean_table_name(raw_name)
@@ -529,7 +606,7 @@ def build_table(table: Dict[str, Any]) -> str:
             lines.append(build_column(column, name, extracted_exprs))
             lines.append("")
 
-    partition_query = _mquery(table, name)
+    partition_query = _mquery(table, name, valid_table_names, extracted_exprs)
     lines.append(f"{INDENT}partition {quote_tmdl(name)} = m")
     lines.append(f"{INDENT*2}mode: import")
     lines.append(f"{INDENT*2}source =")
@@ -567,10 +644,11 @@ def build_tables(tables: List[Dict[str, Any]]) -> Dict[str, str]:
         else:
             seen_clean_names[clean_name] = table
 
+    valid_names = set(seen_clean_names.keys())
     for clean_name, table in seen_clean_names.items():
         table_copy = dict(table)
         table_copy["name"] = clean_name
-        files[clean_name] = build_table(table_copy)
+        files[clean_name] = build_table(table_copy, valid_names)
 
     return files
 
