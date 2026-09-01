@@ -43,6 +43,8 @@ class GenerateRequest(BaseModel):
 
     # Git deployment
     branch: Optional[str] = None
+    git_branch: Optional[str] = None
+    github_branch: Optional[str] = None
     repo: Optional[str] = None
     git_repo: Optional[str] = None
     github_repo: Optional[str] = None
@@ -96,6 +98,13 @@ class GenerateRequest(BaseModel):
             r = data.get("repo") or data.get("git_repo") or data.get("github_repo")
             if r and not str(r).startswith("{{") and str(r).strip():
                 data["repo"] = str(r).strip()
+
+            # Normalize git branch. Callers send `git_branch`/`github_branch`
+            # as often as `branch`; without this the value was dropped and
+            # every push silently landed on config.BRANCH instead.
+            b = data.get("branch") or data.get("git_branch") or data.get("github_branch")
+            if b and not str(b).startswith("{{") and str(b).strip():
+                data["branch"] = str(b).strip()
 
             o = data.get("org") or data.get("git_org") or data.get("github_org")
             if o and not str(o).startswith("{{") and str(o).strip():

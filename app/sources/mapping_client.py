@@ -1,5 +1,6 @@
 """Fetch the mapping result from the MongoDB microservice."""
 
+import os
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -18,30 +19,79 @@ def _timeout():
     return (config.HTTP_CONNECT_TIMEOUT, config.HTTP_READ_TIMEOUT)
 
 
+def _discovery_timeout():
+    """Shorter budget for probing candidate bases.
+
+    `fetch_mapping` tries several base URLs; using the full read timeout for
+    each turns one unreachable host into minutes of dead time before the
+    caller sees any answer.
+    """
+    return (min(config.HTTP_CONNECT_TIMEOUT, 5), min(config.HTTP_READ_TIMEOUT, 30))
+
+
 def _rows(payload: Any) -> List[Dict[str, Any]]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     return [payload] if isinstance(payload, dict) else []
 
 
+def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Optional[str]) -> bool:
+    """True when `row` really is the mapping for the requested app/run.
+
+    Some store endpoints ignore the id in the path and answer with the newest
+    document they have. Building a report from another app's mapping is worse
+    than failing: it produces a confident, successful-looking deployment of
+    the wrong report. Anything that carries a conflicting id is rejected; a
+    document that states no id at all is accepted, since older records were
+    written without one.
+    """
+    mapping = row.get("mapping_result") if isinstance(row.get("mapping_result"), dict) else row
+    metadata = mapping.get("workbook_metadata") if isinstance(mapping.get("workbook_metadata"), dict) else {}
+
+    def _candidates(key: str) -> set:
+        found = set()
+        for source in (row, mapping, metadata):
+            value = source.get(key)
+            if value is not None and str(value).strip():
+                found.add(str(value).strip())
+        return found
+
+    for requested, key in ((run_id, "run_id"), (app_id, "app_id")):
+        if not requested:
+            continue
+        stated = _candidates(key)
+        if stated and str(requested).strip() not in stated:
+            return False
+    return True
+
+
+def _bases() -> List[str]:
+    """Candidate mapping-store base URLs, most specific first.
+
+    Only the configured store and an optional local sidecar are probed.
+    Extra hosts belong in MAPPING_API_FALLBACKS (comma-separated), not
+    hardcoded here - a hardcoded shared host silently serves whatever
+    unrelated run happens to be newest on it.
+    """
+    extra = [b.strip() for b in os.getenv("MAPPING_API_FALLBACKS", "").split(",") if b.strip()]
+    candidates = [config.MONGO_API_URL, os.getenv("MAPPING_LOCAL_API", "http://127.0.0.1:8008"), *extra]
+
+    clean: List[str] = []
+    for base in candidates:
+        stripped = base.rstrip("/") if base else ""
+        if stripped and stripped not in clean:
+            clean.append(stripped)
+    return clean
+
+
 def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any]:
-    """Newest mapping result for a run, falling back to the app across candidate base URLs."""
-    bases = [
-        "http://127.0.0.1:8008",
-        "http://localhost:8008",
-        "http://127.0.0.1:8005",
-        "http://localhost:8005",
-        config.MONGO_API_URL,
-        "https://qlik-tableau-mapping.onrender.com",
-        "https://mongo-db-k15s.onrender.com",
-        "https://tableaue-mongo-db.onrender.com",
-    ]
-    # Remove trailing slashes & duplicates while preserving order
-    clean_bases = []
-    for b in bases:
-        cb = b.rstrip("/") if b else ""
-        if cb and cb not in clean_bases:
-            clean_bases.append(cb)
+    """Newest mapping result for a run, falling back to the app.
+
+    Every candidate path is scoped to the requested run_id or app_id, and
+    every returned document is checked against that id before it is used.
+    """
+    if not (run_id or app_id):
+        raise MappingNotFound("A run_id or app_id is required to fetch a mapping result.")
 
     paths = []
     if run_id:
@@ -56,13 +106,13 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
             f"/api/mapping/by-app/{app_id}",
             f"/api/mapping/{app_id}",
         ])
-    paths.append("/api/mapping")
 
-    for base in clean_bases:
+    rejected = 0
+    for base in _bases():
         for path in paths:
             url = f"{base}{path}"
             try:
-                response = requests.get(url, timeout=_timeout())
+                response = requests.get(url, timeout=_discovery_timeout())
             except requests.RequestException as exc:
                 logger.warning("Mapping fetch failed for %s: %s", url, exc)
                 continue
@@ -77,15 +127,27 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
                 continue
 
             for row in reversed(rows):  # newest last
-                mapping = row.get("mapping_result") if isinstance(row, dict) else None
-                if isinstance(mapping, dict) and mapping:
-                    logger.info("Loaded mapping from %s", url)
-                    return row
-                if isinstance(row, dict) and row.get("tables"):
-                    logger.info("Loaded direct mapping from %s", url)
-                    return row
+                if not isinstance(row, dict):
+                    continue
+                mapping = row.get("mapping_result")
+                has_mapping = (isinstance(mapping, dict) and bool(mapping)) or bool(row.get("tables"))
+                if not has_mapping:
+                    continue
+                if not _identity_matches(row, app_id, run_id):
+                    rejected += 1
+                    logger.warning(
+                        "Discarding mapping from %s: it belongs to a different app/run than "
+                        "app_id=%r run_id=%r.", url, app_id, run_id,
+                    )
+                    continue
+                logger.info("Loaded mapping from %s", url)
+                return row
 
+    detail = (
+        f" {rejected} document(s) were returned but belonged to a different app/run."
+        if rejected else ""
+    )
     raise MappingNotFound(
-        f"No mapping result found for run_id={run_id!r} / app_id={app_id!r}. "
+        f"No mapping result found for run_id={run_id!r} / app_id={app_id!r}.{detail} "
         "Run the mapping agent first."
     )

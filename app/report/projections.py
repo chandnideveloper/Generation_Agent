@@ -14,11 +14,15 @@ def _names(items: Any) -> List[str]:
     resolved = []
     for item in as_list(items):
         if isinstance(item, dict):
-            name = text(item.get("name") or item.get("field_name") or item.get("title"))
+            expr = text(item.get("expression") or item.get("qDef"))
+            name = text(item.get("name") or item.get("field_name") or item.get("title") or item.get("label"))
+            cand = expr if (expr and ("{" in expr or "(" in expr)) else (name or expr)
+            if cand:
+                resolved.append(cand)
         else:
             name = text(item)
-        if name:
-            resolved.append(name)
+            if name:
+                resolved.append(name)
     return resolved
 
 
