@@ -265,7 +265,7 @@ def build_visual(
         if bucket:
             projections[category_role] = bucket
 
-    # ── scatterChart: X Axis / Y Axis / Size ─────────────────────────────────
+    # ── scatterChart: X / Y / Size / Category ────────────────────────────────
     if visual_type == "scatterChart":
         def _resolve_scatter_field(name: str, idx: int, use_agg: bool):
             match = _match_field(name, measure_home, column_home, field_resolver)
@@ -277,11 +277,14 @@ def build_visual(
             unbound.append(name.strip())
             return None
 
-        # dimensions → Details (the category/color grouping)
+        # dimensions → Category / Details (the category grouping)
+        cat_bucket = []
         for i, d in enumerate(dimensions):
             p = _resolve_scatter_field(d, i, False)
             if p:
-                projections.setdefault("Details", []).append(p)
+                cat_bucket.append(p)
+        if cat_bucket:
+            projections["Category"] = cat_bucket
 
         # measures[0] → X Axis, measures[1] → Y Axis, measures[2] → Size
         x_fields = measures[:1]
@@ -306,9 +309,9 @@ def build_visual(
             if p:
                 size_bucket.append(p)
         if x_bucket:
-            projections["X Axis"] = x_bucket
+            projections["X"] = x_bucket
         if y_bucket:
-            projections["Y Axis"] = y_bucket
+            projections["Y"] = y_bucket
         if size_bucket:
             projections["Size"] = size_bucket
 
@@ -427,9 +430,8 @@ def build_visual(
         or text(meas_color)
     )
 
-    # ── actionButton: add action object ──────────────────────────────────────
+    # ── actionButton: add text, fill, outline, and action objects ────────────
     if visual_type == "actionButton":
-        # Try to find a bookmark or page name to navigate to
         btn_action_data = (
             as_dict(source.get("button_action"))
             or as_dict(source.get("actions"))
@@ -439,37 +441,83 @@ def build_visual(
         page_ref = text(btn_action_data.get("page") or btn_action_data.get("target_sheet"))
         url_ref = text(btn_action_data.get("url") or btn_action_data.get("navigation_url"))
         if bookmark_ref:
-            action_type = "Bookmark"
             nav_props = {
                 "type": {"expr": {"Literal": {"Value": "'Bookmark'"}}},
                 "bookmarkName": {"expr": {"Literal": {"Value": f"'{bookmark_ref}'"}}},
             }
         elif page_ref:
-            action_type = "PageNavigation"
             nav_props = {
                 "type": {"expr": {"Literal": {"Value": "'PageNavigation'"}}},
                 "navigationSection": {"expr": {"Literal": {"Value": f"'{page_ref}'"}}},
             }
         elif url_ref:
-            action_type = "WebURL"
             nav_props = {
                 "type": {"expr": {"Literal": {"Value": "'WebURL'"}}},
                 "url": {"expr": {"Literal": {"Value": f"'{url_ref}'"}}},
             }
         else:
-            # Default: navigate to next page alphabetically
-            action_type = "PageNavigation"
             nav_props = {
                 "type": {"expr": {"Literal": {"Value": "'PageNavigation'"}}},
             }
         objects["action"] = [{"properties": nav_props}]
-        btn_color = text(style.get("button_color") or style.get("primary_color") or (custom_coloring.get("single_color") if isinstance(custom_coloring, dict) else None) or "#0065B3")
-        objects["fill"] = [{"properties": {
-            "show": {"expr": {"Literal": {"Value": "true"}}},
-            "fillColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_color}'"}}}}},
-        }}]
 
-    # ── Canvas / Container background ─────────────────────────────────────────
+        btn_color = text(
+            style.get("button_color")
+            or style.get("primary_color")
+            or (custom_coloring.get("single_color") if isinstance(custom_coloring, dict) else None)
+            or "#0065B3"
+        )
+        btn_text = text(
+            source.get("button_text")
+            or source.get("label")
+            or formatting_dict.get("title")
+            or source.get("title")
+            or title
+        )
+        objects["text"] = [{
+            "properties": {
+                "show": {"expr": {"Literal": {"Value": "true"}}},
+                "text": {"expr": {"Literal": {"Value": f"'{btn_text}'"}}},
+                "fontSize": {"expr": {"Literal": {"Value": "11D"}}},
+                "fontColor": {"solid": {"color": {"expr": {"Literal": {"Value": "'#FFFFFF'"}}}}},
+                "alignment": {"expr": {"Literal": {"Value": "'center'"}}},
+            }
+        }]
+        objects["fill"] = [{
+            "properties": {
+                "show": {"expr": {"Literal": {"Value": "true"}}},
+                "fillColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_color}'"}}}}},
+                "transparency": {"expr": {"Literal": {"Value": "0D"}}},
+            }
+        }]
+        objects["outline"] = [{
+            "properties": {
+                "show": {"expr": {"Literal": {"Value": "true"}}},
+                "lineColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_color}'"}}}}},
+                "weight": {"expr": {"Literal": {"Value": "1D"}}},
+            }
+        }]
+
+    # ── image visual: add image url and scaling ──────────────────────────────
+    if visual_type == "image":
+        img_url = text(
+            source.get("image_url")
+            or source.get("url")
+            or source.get("media_url")
+            or source.get("src")
+            or as_dict(source.get("image")).get("url")
+            or as_dict(as_dict(source.get("style")).get("image")).get("url")
+            or as_dict(fabric.get("image")).get("url")
+            or "https://raw.githubusercontent.com/microsoft/PowerBI-visuals/master/assets/powerbi.png"
+        )
+        objects["image"] = [{
+            "properties": {
+                "url": {"expr": {"Literal": {"Value": f"'{img_url}'"}}},
+                "scaling": {"expr": {"Literal": {"Value": "'Fit'"}}},
+            }
+        }]
+
+    # ── Canvas / Container background & border ───────────────────────────────
     formatting_dict = as_dict(source.get("formatting"))
     components_list = as_list(as_dict(source.get("style_and_formatting")).get("components"))
     comp_bg = None
@@ -497,38 +545,44 @@ def build_visual(
             }
         }]
 
+    border_color = text(style.get("border_color") or formatting_dict.get("border_color") or "#E5E5E5")
+    objects["border"] = [{
+        "properties": {
+            "show": {"expr": {"Literal": {"Value": "true"}}},
+            "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{border_color}'"}}}}},
+            "radius": {"expr": {"Literal": {"Value": "4D"}}}
+        }
+    }]
+
     kpi_styling = as_dict(source.get("kpi_styling")) or as_dict(fabric.get("kpi_styling"))
     if visual_type == "card":
-        val_color = text(kpi_styling.get("value_color") or single_color)
-        val_size = kpi_styling.get("value_font_size")
-        val_font = text(kpi_styling.get("value_font_family"))
+        val_color = text(kpi_styling.get("value_color") or single_color or "#0065B3")
+        val_size = _parse_font_size(kpi_styling.get("value_font_size")) or 28.0
+        val_font = text(kpi_styling.get("value_font_family") or "Segoe UI")
         val_props: Dict[str, Any] = {}
         if val_color and val_color.lower() not in ("default", "none", "auto"):
             val_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{val_color}'"}}}}}
         if val_font and val_font.lower() not in ("default", "none", "auto"):
             clean_vf = val_font.split(",")[0].strip().strip("'").strip('"')
             val_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_vf}'"}}}
-        val_size = _parse_font_size(kpi_styling.get("value_font_size"))
         if val_size is not None:
             if val_size < 5:
                 val_size = val_size * 45.0
             val_props["fontSize"] = {"expr": {"Literal": {"Value": f"{val_size}D"}}}
-        if val_props:
-            objects["valueLabel"] = [{"properties": val_props}]
+        objects["valueLabel"] = [{"properties": val_props}]
 
-        lbl_color = text(kpi_styling.get("label_color"))
-        lbl_font = text(kpi_styling.get("label_font_family"))
-        lbl_size = _parse_font_size(kpi_styling.get("label_font_size"))
-        lbl_props: Dict[str, Any] = {}
-        if lbl_color and lbl_color.lower() not in ("default", "none", "auto"):
-            lbl_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{lbl_color}'"}}}}}
+        lbl_color = text(kpi_styling.get("label_color") or "#605E5C")
+        lbl_font = text(kpi_styling.get("label_font_family") or "Segoe UI")
+        lbl_size = _parse_font_size(kpi_styling.get("label_font_size")) or 10.0
+        lbl_props: Dict[str, Any] = {
+            "show": {"expr": {"Literal": {"Value": "true"}}},
+            "fontColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{lbl_color}'"}}}}},
+            "fontSize": {"expr": {"Literal": {"Value": f"{lbl_size}D"}}},
+        }
         if lbl_font and lbl_font.lower() not in ("default", "none", "auto"):
             clean_lf = lbl_font.split(",")[0].strip().strip("'").strip('"')
             lbl_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_lf}'"}}}
-        if lbl_size is not None:
-            lbl_props["fontSize"] = {"expr": {"Literal": {"Value": f"{lbl_size}D"}}}
-        if lbl_props:
-            objects["categoryLabel"] = [{"properties": lbl_props}]
+        objects["categoryLabel"] = [{"properties": lbl_props}]
     elif single_color and single_color.lower() not in ("default", "none", "auto"):
         objects["dataPoint"] = [{
             "properties": {

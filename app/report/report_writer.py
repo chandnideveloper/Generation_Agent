@@ -251,14 +251,40 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
                 )
                 nav_button_count += 1
 
-        files[f"definition/pages/{page_id}/page.json"] = json.dumps({
+        sheet_obj = sheets.get(sheet_name, {})
+        sheet_props = as_dict(sheet_obj.get("properties"))
+        sheet_style = as_dict(sheet_obj.get("style"))
+        page_bg = (
+            text(sheet_props.get("backgroundColor") or sheet_props.get("background_color"))
+            or text(sheet_style.get("backgroundColor") or sheet_style.get("background_color"))
+            or text(as_dict(mapping.get("app_layout", {}).get("theme", {})).get("background_color"))
+            or "#F8F9FA"
+        )
+        page_doc: Dict[str, Any] = {
             "$schema": S.PAGE,
             "name": page_id,
             "displayName": sheet_name,
             "displayOption": display_option,
             "height": page_height,
             "width": config.CANVAS_WIDTH,
-        }, indent=2)
+        }
+        if page_bg and page_bg.startswith("#"):
+            page_doc["objects"] = {
+                "background": [{
+                    "properties": {
+                        "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{page_bg}'"}}}}},
+                        "transparency": {"expr": {"Literal": {"Value": "0D"}}}
+                    }
+                }],
+                "outspacePane": [{
+                    "properties": {
+                        "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{page_bg}'"}}}}},
+                        "transparency": {"expr": {"Literal": {"Value": "0D"}}}
+                    }
+                }]
+            }
+
+        files[f"definition/pages/{page_id}/page.json"] = json.dumps(page_doc, indent=2)
 
     files["definition/pages/pages.json"] = json.dumps({
         "$schema": S.PAGES_METADATA,

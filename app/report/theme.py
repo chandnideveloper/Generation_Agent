@@ -189,9 +189,64 @@ def build_theme_json(mapping: Optional[Dict[str, Any]] = None) -> str:
                     ]
                 }
             },
+            "actionButton": {
+                "*": {
+                    "text": [
+                        {
+                            "show": True,
+                            "fontColor": {"solid": {"color": "#FFFFFF"}},
+                            "fontSize": 11,
+                            "fontFamily": f"{font_family} Semibold",
+                            "alignment": "center"
+                        }
+                    ],
+                    "fill": [
+                        {
+                            "show": True,
+                            "fillColor": {"solid": {"color": primary_color}},
+                            "transparency": 0
+                        }
+                    ],
+                    "outline": [
+                        {
+                            "show": True,
+                            "lineColor": {"solid": {"color": primary_color}},
+                            "weight": 1
+                        }
+                    ]
+                }
+            },
+            "tableEx": {
+                "*": {
+                    "grid": [
+                        {
+                            "gridVertical": True,
+                            "gridHorizontal": True,
+                            "gridVerticalColor": {"solid": {"color": "#E5E5E5"}},
+                            "gridHorizontalColor": {"solid": {"color": "#E5E5E5"}}
+                        }
+                    ],
+                    "columnHeaders": [
+                        {
+                            "fontColor": {"solid": {"color": "#252423"}},
+                            "backColor": {"solid": {"color": "#F8F9FA"}},
+                            "fontSize": 10,
+                            "fontFamily": f"{font_family} Semibold"
+                        }
+                    ],
+                    "values": [
+                        {
+                            "fontColorPrimary": {"solid": {"color": "#252423"}},
+                            "fontSize": 10,
+                            "fontFamily": font_family
+                        }
+                    ]
+                }
+            },
             "page": {
                 "*": {
-                    "background": [{"transparency": 0, "color": {"solid": {"color": "#F4F5F7"}}}]
+                    "background": [{"transparency": 0, "color": {"solid": {"color": bg_color or "#F8F9FA"}}}],
+                    "outspace": [{"transparency": 0, "color": {"solid": {"color": bg_color or "#F8F9FA"}}}]
                 }
             }
         }
