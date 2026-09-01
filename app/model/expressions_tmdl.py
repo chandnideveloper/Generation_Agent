@@ -89,7 +89,7 @@ def build_expression(connection: Dict[str, Any], index: int) -> Tuple[str, str]:
                 m = re.search(r"(?:google_?bigquery_|gbq_)([a-zA-Z0-9_\-]+)", name, re.IGNORECASE)
                 if m:
                     proj = m.group(1)
-            source = f'GoogleBigQuery.Database([BillingProject="{proj}"]' if proj else 'GoogleBigQuery.Database()'
+            source = f'GoogleBigQuery.Database([BillingProject="{proj}"]' + ')' if proj else 'GoogleBigQuery.Database()'
         elif "AmazonRedshift" in function:
             server = text(connection.get("server"))
             port = text(connection.get("port") or "5439")
