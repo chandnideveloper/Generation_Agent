@@ -274,12 +274,6 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
                         "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{page_bg}'"}}}}},
                         "transparency": {"expr": {"Literal": {"Value": "0D"}}}
                     }
-                }],
-                "outspacePane": [{
-                    "properties": {
-                        "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{page_bg}'"}}}}},
-                        "transparency": {"expr": {"Literal": {"Value": "0D"}}}
-                    }
                 }]
             }
 
