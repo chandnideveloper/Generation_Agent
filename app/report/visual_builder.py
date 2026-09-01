@@ -465,7 +465,6 @@ def build_visual(
             style.get("button_color")
             or style.get("primary_color")
             or (custom_coloring.get("single_color") if isinstance(custom_coloring, dict) else None)
-            or "#0065B3"
         )
         btn_text = text(
             source.get("button_text")
@@ -474,29 +473,34 @@ def build_visual(
             or source.get("title")
             or title
         )
-        objects["text"] = [{
-            "properties": {
-                "show": {"expr": {"Literal": {"Value": "true"}}},
-                "text": {"expr": {"Literal": {"Value": f"'{btn_text}'"}}},
-                "fontSize": {"expr": {"Literal": {"Value": "11D"}}},
-                "fontColor": {"solid": {"color": {"expr": {"Literal": {"Value": "'#FFFFFF'"}}}}},
-                "alignment": {"expr": {"Literal": {"Value": "'center'"}}},
-            }
-        }]
-        objects["fill"] = [{
-            "properties": {
-                "show": {"expr": {"Literal": {"Value": "true"}}},
-                "fillColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_color}'"}}}}},
-                "transparency": {"expr": {"Literal": {"Value": "0D"}}},
-            }
-        }]
-        objects["outline"] = [{
-            "properties": {
-                "show": {"expr": {"Literal": {"Value": "true"}}},
-                "lineColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_color}'"}}}}},
-                "weight": {"expr": {"Literal": {"Value": "1D"}}},
-            }
-        }]
+        btn_text_color = text(style.get("font_color") or style.get("color") or formatting_dict.get("font_color"))
+        text_props: Dict[str, Any] = {
+            "show": {"expr": {"Literal": {"Value": "true"}}},
+            "text": {"expr": {"Literal": {"Value": f"'{btn_text}'"}}},
+            "alignment": {"expr": {"Literal": {"Value": "'center'"}}},
+        }
+        btn_font_size = _parse_font_size(style.get("font_size") or formatting_dict.get("font_size"))
+        if btn_font_size is not None:
+            text_props["fontSize"] = {"expr": {"Literal": {"Value": f"{btn_font_size}D"}}}
+        if btn_text_color:
+            text_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_text_color}'"}}}}}
+        objects["text"] = [{"properties": text_props}]
+
+        if btn_color:
+            objects["fill"] = [{
+                "properties": {
+                    "show": {"expr": {"Literal": {"Value": "true"}}},
+                    "fillColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_color}'"}}}}},
+                    "transparency": {"expr": {"Literal": {"Value": "0D"}}},
+                }
+            }]
+            objects["outline"] = [{
+                "properties": {
+                    "show": {"expr": {"Literal": {"Value": "true"}}},
+                    "lineColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{btn_color}'"}}}}},
+                    "weight": {"expr": {"Literal": {"Value": "1D"}}},
+                }
+            }]
 
     # ── image visual: add image url and scaling ──────────────────────────────
     if visual_type == "image":
@@ -508,14 +512,14 @@ def build_visual(
             or as_dict(source.get("image")).get("url")
             or as_dict(as_dict(source.get("style")).get("image")).get("url")
             or as_dict(fabric.get("image")).get("url")
-            or "https://raw.githubusercontent.com/microsoft/PowerBI-visuals/master/assets/powerbi.png"
         )
-        objects["image"] = [{
-            "properties": {
-                "url": {"expr": {"Literal": {"Value": f"'{img_url}'"}}},
-                "scaling": {"expr": {"Literal": {"Value": "'Fit'"}}},
-            }
-        }]
+        if img_url:
+            objects["image"] = [{
+                "properties": {
+                    "url": {"expr": {"Literal": {"Value": f"'{img_url}'"}}},
+                    "scaling": {"expr": {"Literal": {"Value": "'Fit'"}}},
+                }
+            }]
 
     # ── Canvas / Container background & border ───────────────────────────────
     formatting_dict = as_dict(source.get("formatting"))
@@ -545,20 +549,21 @@ def build_visual(
             }
         }]
 
-    border_color = text(style.get("border_color") or formatting_dict.get("border_color") or "#E5E5E5")
-    objects["border"] = [{
-        "properties": {
-            "show": {"expr": {"Literal": {"Value": "true"}}},
-            "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{border_color}'"}}}}},
-            "radius": {"expr": {"Literal": {"Value": "4D"}}}
-        }
-    }]
+    border_color = text(style.get("border_color") or formatting_dict.get("border_color"))
+    if border_color and border_color.lower() not in ("default", "none", "auto"):
+        objects["border"] = [{
+            "properties": {
+                "show": {"expr": {"Literal": {"Value": "true"}}},
+                "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{border_color}'"}}}}},
+                "radius": {"expr": {"Literal": {"Value": "4D"}}}
+            }
+        }]
 
     kpi_styling = as_dict(source.get("kpi_styling")) or as_dict(fabric.get("kpi_styling"))
     if visual_type == "card":
-        val_color = text(kpi_styling.get("value_color") or single_color or "#0065B3")
-        val_size = _parse_font_size(kpi_styling.get("value_font_size")) or 28.0
-        val_font = text(kpi_styling.get("value_font_family") or "Segoe UI")
+        val_color = text(kpi_styling.get("value_color") or single_color)
+        val_size = _parse_font_size(kpi_styling.get("value_font_size"))
+        val_font = text(kpi_styling.get("value_font_family"))
         val_props: Dict[str, Any] = {}
         if val_color and val_color.lower() not in ("default", "none", "auto"):
             val_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{val_color}'"}}}}}
@@ -569,20 +574,22 @@ def build_visual(
             if val_size < 5:
                 val_size = val_size * 45.0
             val_props["fontSize"] = {"expr": {"Literal": {"Value": f"{val_size}D"}}}
-        objects["valueLabel"] = [{"properties": val_props}]
+        if val_props:
+            objects["valueLabel"] = [{"properties": val_props}]
 
-        lbl_color = text(kpi_styling.get("label_color") or "#605E5C")
-        lbl_font = text(kpi_styling.get("label_font_family") or "Segoe UI")
-        lbl_size = _parse_font_size(kpi_styling.get("label_font_size")) or 10.0
-        lbl_props: Dict[str, Any] = {
-            "show": {"expr": {"Literal": {"Value": "true"}}},
-            "fontColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{lbl_color}'"}}}}},
-            "fontSize": {"expr": {"Literal": {"Value": f"{lbl_size}D"}}},
-        }
+        lbl_color = text(kpi_styling.get("label_color"))
+        lbl_font = text(kpi_styling.get("label_font_family"))
+        lbl_size = _parse_font_size(kpi_styling.get("label_font_size"))
+        lbl_props: Dict[str, Any] = {}
+        if lbl_color and lbl_color.lower() not in ("default", "none", "auto"):
+            lbl_props["fontColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{lbl_color}'"}}}}}
         if lbl_font and lbl_font.lower() not in ("default", "none", "auto"):
             clean_lf = lbl_font.split(",")[0].strip().strip("'").strip('"')
             lbl_props["fontFamily"] = {"expr": {"Literal": {"Value": f"'{clean_lf}'"}}}
-        objects["categoryLabel"] = [{"properties": lbl_props}]
+        if lbl_size is not None:
+            lbl_props["fontSize"] = {"expr": {"Literal": {"Value": f"{lbl_size}D"}}}
+        if lbl_props:
+            objects["categoryLabel"] = [{"properties": lbl_props}]
     elif single_color and single_color.lower() not in ("default", "none", "auto"):
         objects["dataPoint"] = [{
             "properties": {
@@ -603,7 +610,7 @@ def build_visual(
             ref = as_dict(ref)
             ref_label = text(ref.get("label") or "Reference Line")
             ref_expr = text(ref.get("expression") or ref.get("value") or "0")
-            ref_color = text(ref.get("color") or "#888888")
+            ref_color = text(ref.get("color"))
             ref_style = text(ref.get("line_type") or ref.get("lineStyle") or "dashed").lower()
             if ref_style not in ("solid", "dashed", "dotted"):
                 ref_style = "dashed"
@@ -611,10 +618,11 @@ def build_visual(
             ref_prop: Dict[str, Any] = {
                 "show": {"expr": {"Literal": {"Value": "true"}}},
                 "displayName": {"expr": {"Literal": {"Value": f"'{ref_label}'"}}},
-                "lineColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{ref_color}'"}}}}},
                 "lineStyle": {"expr": {"Literal": {"Value": f"'{ref_style}'"}}},
                 "dataLabelShow": {"expr": {"Literal": {"Value": "true" if ref.get("show_label", True) else "false"}}},
             }
+            if ref_color:
+                ref_prop["lineColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{ref_color}'"}}}}}
             if ref_expr:
                 try:
                     num_val = float(ref_expr)
@@ -635,14 +643,14 @@ def build_visual(
     if trend_lines:
         t_item = as_dict(trend_lines[0])
         t_style = text(t_item.get("line_type") or "solid").lower()
-        tl_color = text(t_item.get("color") or (custom_coloring.get("single_color") if isinstance(custom_coloring, dict) else None) or "#0065B3")
-        objects["trendLine"] = [{
-            "properties": {
-                "show": {"expr": {"Literal": {"Value": "true"}}},
-                "lineColor": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{tl_color}'"}}}}},
-                "style": {"expr": {"Literal": {"Value": f"'{t_style}'"}}}
-            }
-        }]
+        tl_color = text(t_item.get("color") or (custom_coloring.get("single_color") if isinstance(custom_coloring, dict) else None))
+        tl_props: Dict[str, Any] = {
+            "show": {"expr": {"Literal": {"Value": "true"}}},
+            "style": {"expr": {"Literal": {"Value": f"'{t_style}'"}}}
+        }
+        if tl_color:
+            tl_props["lineColor"] = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{tl_color}'"}}}}}
+        objects["trendLine"] = [{"properties": tl_props}]
 
     if visual_type == "textbox":
         # A placeholder must say why it is empty, on the canvas itself.

@@ -258,7 +258,6 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
             text(sheet_props.get("backgroundColor") or sheet_props.get("background_color"))
             or text(sheet_style.get("backgroundColor") or sheet_style.get("background_color"))
             or text(as_dict(mapping.get("app_layout", {}).get("theme", {})).get("background_color"))
-            or "#F8F9FA"
         )
         page_doc: Dict[str, Any] = {
             "$schema": S.PAGE,

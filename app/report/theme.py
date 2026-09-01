@@ -245,8 +245,8 @@ def build_theme_json(mapping: Optional[Dict[str, Any]] = None) -> str:
             },
             "page": {
                 "*": {
-                    "background": [{"transparency": 0, "color": {"solid": {"color": bg_color or "#F8F9FA"}}}],
-                    "outspace": [{"transparency": 0, "color": {"solid": {"color": bg_color or "#F8F9FA"}}}]
+                    "background": [{"transparency": 0, "color": {"solid": {"color": bg_color}}}],
+                    "outspace": [{"transparency": 0, "color": {"solid": {"color": bg_color}}}]
                 }
             }
         }
