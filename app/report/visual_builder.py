@@ -248,101 +248,139 @@ def build_visual(
         or visual.get("y_axis")
     )
 
-    if category_role:
-        bucket = []
-        for index, field in enumerate(dimensions):
-            field_clean = field.strip()
-            match = _match_field(field_clean, measure_home, column_home, field_resolver)
-            if match:
-                ent, prop, is_meas = match
-                proj = _measure_projection(ent, prop) if is_meas else _projection(ent, prop, index)
-                bucket.append(proj)
-            else:
-                unbound.append(field_clean)
-        if not bucket and visual_type == "slicer" and qlik_type in ("qlik-variable-input", "variable-input", "variableinput", "variable"):
-            # Variable input slicer bound to dynamic Parameters table
-            bucket.append(_projection("Parameters", "Label", 0))
-        if bucket:
-            projections[category_role] = bucket
+    # Check if explicit field_roles were produced by the mapping agent / LLM
+    explicit_field_roles = as_list(fabric.get("field_roles") or visual.get("field_roles"))
+    if explicit_field_roles:
+        for entry in explicit_field_roles:
+            if not isinstance(entry, dict):
+                continue
+            role = text(entry.get("role"))
+            field_name = text(entry.get("field"))
+            if not role or role == "Unbound":
+                if field_name:
+                    unbound.append(field_name)
+                continue
+            ent = text(entry.get("entity"))
+            prop = text(entry.get("property"))
+            is_meas = bool(entry.get("is_measure"))
+            agg = text(entry.get("aggregation") or "None")
 
-    # ── scatterChart: X / Y / Size / Category ────────────────────────────────
-    if visual_type == "scatterChart":
-        def _resolve_scatter_field(name: str, idx: int, use_agg: bool):
-            match = _match_field(name, measure_home, column_home, field_resolver)
-            if match:
-                ent, prop, is_meas = match
+            if not (ent and prop) and field_name:
+                match = _match_field(field_name, measure_home, column_home, field_resolver)
+                if match:
+                    ent, prop, is_meas = match
+
+            if ent and prop:
+                idx = len(projections.get(role, []))
                 if is_meas:
-                    return _measure_projection(ent, prop)
-                return _aggregation_projection(ent, prop, idx, 0) if use_agg else _projection(ent, prop, idx)
-            unbound.append(name.strip())
-            return None
-
-        # dimensions → Category / Details (the category grouping)
-        cat_bucket = []
-        for i, d in enumerate(dimensions):
-            p = _resolve_scatter_field(d, i, False)
-            if p:
-                cat_bucket.append(p)
-        if cat_bucket:
-            projections["Category"] = cat_bucket
-
-        # measures[0] → X Axis, measures[1] → Y Axis, measures[2] → Size
-        x_fields = measures[:1]
-        y_fields = measures[1:2]
-        z_fields = measures[2:3]
-        if not y_fields and len(measures) == 1:
-            y_fields = x_fields
-            x_fields = []
-        x_bucket = []
-        for f in x_fields:
-            p = _resolve_scatter_field(f, len(x_bucket), True)
-            if p:
-                x_bucket.append(p)
-        y_bucket = []
-        for f in y_fields:
-            p = _resolve_scatter_field(f, len(y_bucket), True)
-            if p:
-                y_bucket.append(p)
-        size_bucket = []
-        for f in z_fields:
-            p = _resolve_scatter_field(f, len(size_bucket), True)
-            if p:
-                size_bucket.append(p)
-        if x_bucket:
-            projections["X"] = x_bucket
-        if y_bucket:
-            projections["Y"] = y_bucket
-        if size_bucket:
-            projections["Size"] = size_bucket
-
-    elif value_role:
-        bucket = []
-        is_chart_value = visual_type not in ("tableEx", "pivotTable", "slicer") and value_role in ("Y", "Values", "Size")
-        for field in measures:
-            field_clean = field.strip()
-            match = _match_field(field_clean, measure_home, column_home, field_resolver)
-            if match:
-                ent, prop, is_meas = match
-                if is_meas:
-                    bucket.append(_measure_projection(ent, prop))
+                    proj = _measure_projection(ent, prop)
+                elif agg and agg.lower() not in ("none", "null", ""):
+                    proj = _aggregation_projection(ent, prop, idx, 0)
                 else:
-                    proj = _aggregation_projection(ent, prop, len(bucket), 0) if is_chart_value else _projection(ent, prop, len(bucket))
+                    proj = _projection(ent, prop, idx)
+                projections.setdefault(role, []).append(proj)
+            elif field_name:
+                unbound.append(field_name)
+
+    # Fallback to deterministic/heuristic field resolution if explicit roles not present
+    if not projections:
+        if category_role:
+            bucket = []
+            for index, field in enumerate(dimensions):
+                field_clean = field.strip()
+                match = _match_field(field_clean, measure_home, column_home, field_resolver)
+                if match:
+                    ent, prop, is_meas = match
+                    proj = _measure_projection(ent, prop) if is_meas else _projection(ent, prop, index)
                     bucket.append(proj)
-            else:
-                unbound.append(field_clean)
+                else:
+                    unbound.append(field_clean)
+            if not bucket and visual_type == "slicer" and qlik_type in ("qlik-variable-input", "variable-input", "variableinput", "variable"):
+                # Variable input slicer bound to dynamic Parameters table
+                bucket.append(_projection("Parameters", "Label", 0))
+            if bucket:
+                projections[category_role] = bucket
 
-        if visual_type == "tableEx":
-            # tableEx: dimensions already in Values from category_role; add measures separately
-            meas_bucket = [p for p in bucket]
-            if meas_bucket:
-                projections.setdefault("Values", []).extend(meas_bucket)
-        elif visual_type == "lineClusteredColumnComboChart" and len(bucket) > 1:
-            # Combo chart: first measure → Y (bars), rest → Y2 (line)
-            projections["Y"] = [bucket[0]]
-            projections["Y2"] = bucket[1:]
-        elif bucket:
-            projections.setdefault(value_role, []).extend(bucket)
+        # ── scatterChart: X / Y / Size / Category ────────────────────────────────
+        if visual_type == "scatterChart":
+            def _resolve_scatter_field(name: str, idx: int, use_agg: bool):
+                match = _match_field(name, measure_home, column_home, field_resolver)
+                if match:
+                    ent, prop, is_meas = match
+                    if is_meas:
+                        return _measure_projection(ent, prop)
+                    return _aggregation_projection(ent, prop, idx, 0) if use_agg else _projection(ent, prop, idx)
+                unbound.append(name.strip())
+                return None
 
+            # dimensions → Category / Details (the category grouping)
+            cat_bucket = []
+            for i, d in enumerate(dimensions):
+                p = _resolve_scatter_field(d, i, False)
+                if p:
+                    cat_bucket.append(p)
+            if cat_bucket:
+                projections["Category"] = cat_bucket
+
+            # measures[0] → X Axis, measures[1] → Y Axis, measures[2] → Size
+            x_fields = measures[:1]
+            y_fields = measures[1:2]
+            z_fields = measures[2:3]
+            if not y_fields and len(measures) == 1:
+                y_fields = x_fields
+                x_fields = []
+            x_bucket = []
+            for f in x_fields:
+                p = _resolve_scatter_field(f, len(x_bucket), True)
+                if p:
+                    x_bucket.append(p)
+            y_bucket = []
+            for f in y_fields:
+                p = _resolve_scatter_field(f, len(y_bucket), True)
+                if p:
+                    y_bucket.append(p)
+            size_bucket = []
+            for f in z_fields:
+                p = _resolve_scatter_field(f, len(size_bucket), True)
+                if p:
+                    size_bucket.append(p)
+            if x_bucket:
+                projections["X"] = x_bucket
+            if y_bucket:
+                projections["Y"] = y_bucket
+            if size_bucket:
+                projections["Size"] = size_bucket
+
+        elif value_role:
+            bucket = []
+            is_chart_value = visual_type not in ("tableEx", "pivotTable", "slicer") and value_role in ("Y", "Values", "Size")
+            for field in measures:
+                field_clean = field.strip()
+                match = _match_field(field_clean, measure_home, column_home, field_resolver)
+                if match:
+                    ent, prop, is_meas = match
+                    if is_meas:
+                        bucket.append(_measure_projection(ent, prop))
+                    else:
+                        proj = _aggregation_projection(ent, prop, len(bucket), 0) if is_chart_value else _projection(ent, prop, len(bucket))
+                        bucket.append(proj)
+                else:
+                    unbound.append(field_clean)
+
+            if visual_type == "tableEx":
+                # tableEx: dimensions already in Values from category_role; add measures separately
+                meas_bucket = [p for p in bucket]
+                if meas_bucket:
+                    projections.setdefault("Values", []).extend(meas_bucket)
+            elif visual_type == "lineClusteredColumnComboChart" and len(bucket) > 1:
+                # Combo chart: first measure → Y (bars), rest → Y2 (line)
+                projections["Y"] = [bucket[0]]
+                projections["Y2"] = bucket[1:]
+            elif bucket:
+                projections.setdefault(value_role, []).extend(bucket)
+
+    if not projections and visual_type == "slicer" and qlik_type in ("qlik-variable-input", "variable-input", "variableinput", "variable"):
+        projections.setdefault("Values", []).append(_projection("Parameters", "Label", 0))
 
     name = object_id or lineage_tag(f"visual:{title}:{z_index}")[:8]
 
@@ -423,12 +461,28 @@ def build_visual(
                 meas_color = coloring.get("color")
                 break
 
+    fabric_colors = as_dict(fabric.get("colors")) or as_dict(fabric.get("color")) or as_dict(source.get("colors")) or as_dict(source.get("color"))
     single_color = (
         text(custom_coloring.get("single_color"))
         or text(custom_coloring.get("baseColor"))
         or text(custom_coloring.get("color"))
+        or text(fabric_colors.get("single_color"))
+        or text(fabric_colors.get("resolved_palette_color"))
         or text(meas_color)
     )
+
+    bg_color = (
+        text(fabric_colors.get("background_color"))
+        or text(formatting_dict.get("background_color"))
+        or text(style.get("background_color"))
+    )
+    if bg_color and bg_color.lower() not in ("default", "none", "auto", ""):
+        objects["background"] = [{
+            "properties": {
+                "show": {"expr": {"Literal": {"Value": "true"}}},
+                "color": {"solid": {"color": {"expr": {"Literal": {"Value": f"'{bg_color}'"}}}}}
+            }
+        }]
 
     # ── actionButton: add text, fill, outline, and action objects ────────────
     if visual_type == "actionButton":

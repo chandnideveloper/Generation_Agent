@@ -83,8 +83,8 @@ def test_field_bindings_reference_real_entities(package):
         for role in query["queryState"].values():
             for projection in role["projections"]:
                 field = projection["field"]
-                binding = field.get("Column") or field.get("Measure")
-                assert binding["Expression"]["SourceRef"]["Entity"], path
+                binding = field.get("Column") or field.get("Measure") or (field.get("Aggregation", {}).get("Expression", {}).get("Column") if isinstance(field.get("Aggregation"), dict) else None)
+                assert binding and binding["Expression"]["SourceRef"]["Entity"], path
                 assert binding["Property"], path
 
 

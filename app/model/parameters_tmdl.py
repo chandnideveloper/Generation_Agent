@@ -53,14 +53,28 @@ def build_parameters_tmdl(mapping: Dict[str, Any]) -> Optional[str]:
                 rows.append((vname, val, lbl, order))
                 order += 1
 
-    # 2. Add remaining variables from variable inventory
+    RESERVED_QLIK_VARS = {
+        "thousandsep", "decimalsep", "dateformat", "timeformat", "timestampformat",
+        "moneyformat", "monthnames", "daynames", "moneythousandsep", "moneydecimalsep",
+        "longmonthnames", "longdaynames", "firstweekdate", "brokenweeks", "referenceweek",
+        "firstmonthdate", "colormix1", "colormix2", "nullinterpret", "hideprefix",
+    }
+
+    # 2. Add remaining variables from variable inventory (skip reserved locale variables)
     for v in var_list:
         if not isinstance(v, dict):
             continue
         vname = text(v.get("name") or v.get("variable_name"))
         if not vname:
             continue
+        kind = text(v.get("kind") or v.get("variable_kind") or "").lower()
+        if kind == "reserved" or vname.lower() in RESERVED_QLIK_VARS:
+            continue
+        # Expression variables with no interactive input options belong as DAX measures, not parameter rows
         val = text(v.get("value") or v.get("definition"))
+        if kind == "expression" and vname not in var_options and (val.startswith("=") or "sum(" in val.lower() or "count(" in val.lower()):
+            continue
+
         lbl = text(v.get("description") or v.get("comment") or vname)
         key = (vname, val)
         if key not in seen and val:
