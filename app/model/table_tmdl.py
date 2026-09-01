@@ -250,7 +250,10 @@ def build_column(
 
 
 def _bq_m_query(ep: str, q: str) -> str:
-    proj_clause = f'[BillingProject="{ep}"]' if ep else ''
+    proj = ep
+    proj_clause = f'[BillingProject="{proj}"]' if proj else ''
+    if proj:
+        return f'let\n    Source = GoogleBigQuery.Database({proj_clause}),\n    Db = Source{{[Name="{proj}",Kind="Database"]}}[Data],\n    Result = Value.NativeQuery(Db, "{q}", null, [EnableFolding=false])\nin\n    Result'
     return f'let\n    Source = GoogleBigQuery.Database({proj_clause}),\n    Result = Value.NativeQuery(Source, "{q}", null, [EnableFolding=false])\nin\n    Result'
 
 
@@ -542,7 +545,7 @@ def _mquery(
             if any(bq in token for bq in ["bigquery", "gbq"]):
                 project = conn.get("project") or ""
                 if not project and custom_sql:
-                    bq_match = re.search(r"FROM\s+`([a-zA-Z0-9_\-]+)`", custom_sql, re.IGNORECASE)
+                    bq_match = re.search(r"FROM\s+`?([a-zA-Z0-9_\-]+)`?\.", custom_sql, re.IGNORECASE)
                     if bq_match:
                         project = bq_match.group(1)
                 if not project and conn.get("name"):
@@ -556,10 +559,10 @@ def _mquery(
 
     # Dialect-based fallback if driver was omitted but custom_sql is present
     if custom_sql:
-        if "`" in custom_sql and re.search(r"FROM\s+`[a-zA-Z0-9_\-]+`\.`[a-zA-Z0-9_\-]+`", custom_sql, re.IGNORECASE):
+        if "`" in custom_sql or "bigquery" in str(conn).lower() or re.search(r"FROM\s+`?[a-zA-Z0-9_\-]+`?\.`?[a-zA-Z0-9_\-]+`?", custom_sql, re.IGNORECASE):
             project = conn.get("project") or ""
             if not project:
-                m = re.search(r"FROM\s+`([a-zA-Z0-9_\-]+)`", custom_sql)
+                m = re.search(r"FROM\s+`?([a-zA-Z0-9_\-]+)`?\.", custom_sql)
                 if m:
                     project = m.group(1)
             return CONNECTOR_M_FUNCTIONS["bigquery"][1](project, database or "", schema or "", query_str)
