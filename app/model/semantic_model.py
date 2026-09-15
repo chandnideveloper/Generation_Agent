@@ -18,10 +18,12 @@ from typing import Any, Dict, List, Set, Tuple
 from app.config import config
 from app.model import measure_tmdl
 from app.model.expressions_tmdl import build_expressions
+from app.model.local_date_table import build_local_date_tables
 from app.model.parameters_tmdl import build_parameters_tmdl
-from app.report import pbir_schemas as S
 from app.model.relationship_tmdl import build_relationships
+from app.model.role_tmdl import build_roles_tmdl
 from app.model.table_tmdl import _clean_table_name, build_tables
+from app.report import pbir_schemas as S
 from app.util.ids import lineage_tag, quote_tmdl, safe_filename
 from app.util.payload import as_dict, as_list, text
 from app.util import payload as P
@@ -184,12 +186,25 @@ def build_semantic_model(
     for name, content in table_files.items():
         files[f"definition/tables/{safe_filename(name, 'Table')}.tmdl"] = content
 
+    # Auto-generate hidden LocalDateTable for every datetime column
+    local_date_tables = build_local_date_tables(tables)
+    for ldt_name, ldt_content in local_date_tables.items():
+        files[f"definition/tables/{safe_filename(ldt_name, 'Table')}.tmdl"] = ldt_content
+
+    # Row-Level Security roles from Section Access
+    roles = mapping.get("roles") or []
+    roles_tmdl = build_roles_tmdl(roles)
+    if roles_tmdl:
+        files["definition/roles.tmdl"] = roles_tmdl
+
     report = {
         "tables": len(table_files),
+        "local_date_tables": len(local_date_tables),
         "measures": len(measures),
         "calculated_columns": sum(len(b["columns"]) for b in grouped.values()),
         "relationships_written": relationships_tmdl.count("relationship "),
         "relationships_skipped": skipped,
+        "roles_written": len(roles),
         "orphan_measures_table": measure_tmdl.ORPHAN_TABLE in table_files,
         "shared_expressions": expression_names,
         "dax_needs_rewrite": len(dax_problems),

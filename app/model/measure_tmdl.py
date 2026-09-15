@@ -64,6 +64,9 @@ def _clean_dax(dax_expr: str) -> str:
     if not dax_expr:
         return dax_expr
     cleaned = dax_expr
+    # Fix empty table syntax ' '[Col] and ''[Col] -> [Col]
+    cleaned = re.sub(r"'\s*'\[([^\]]+)\]", r"[\1]", cleaned)
+    cleaned = re.sub(r"''\[([^\]]+)\]", r"[\1]", cleaned)
     # Fix COUNT(DISTINCT expr) -> DISTINCTCOUNT(expr)
     cleaned = re.sub(r"\bCOUNT\s*\(\s*DISTINCT\s+([^\)]+)\)", r"DISTINCTCOUNT(\1)", cleaned, flags=re.IGNORECASE)
     # Fix ''Table'' -> 'Table'
@@ -219,8 +222,19 @@ def build_measure(
 ) -> str:
     """One TMDL measure block, guarded against untranslated Qlik syntax."""
     fabric = as_dict(measure.get("fabric"))
-    name = text(measure.get("name"), "Measure")
-    raw = text(fabric.get("dax_expression") or measure.get("dax_expression"), "BLANK()")
+    name = text(
+        measure.get("name")
+        or measure.get("fabric_measure_name")
+        or measure.get("qlik_measure_name"),
+        "Measure",
+    )
+    raw = text(
+        fabric.get("dax_expression")
+        or measure.get("dax_expression")
+        or measure.get("dax")
+        or measure.get("target_expression"),
+        "BLANK()",
+    )
     raw_fmt = fabric.get("format_string") or measure.get("format_string") or measure.get("num_format") or measure.get("qlik_number_format")
     fmt = _resolve_format_string(raw_fmt)
 

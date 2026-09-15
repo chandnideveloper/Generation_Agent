@@ -6,3 +6,4 @@ generated/
 legacy/
 venv/
 scratch/
+mapping.json

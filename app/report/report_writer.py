@@ -17,12 +17,14 @@ One page per Qlik sheet; visuals belonging to no sheet land on an
 
 import json
 import re
+import difflib
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import config
 from app.report import bookmarks as bookmark_builder
 from app.report import layout as layout_util
 from app.report import pbir_schemas as S
+from app.report.filters import _categorical_filter, _field_filter
 from app.report.report_files import _pbir, _platform, _report_json
 from app.report.theme import base_theme_json, build_theme_json
 from app.report.visual_builder import build_visual
@@ -48,13 +50,19 @@ def _entity_maps(mapping: Dict[str, Any]):
     Dynamically extracts table/column ownership from tables, dimensions,
     and measures in the mapping payload without hardcoded lookups.
     """
+    known_tables = {
+        _clean_table_name(text(t.get("name") or t.get("table_name")))
+        for t in P.tables(mapping)
+    }
     measure_home: Dict[str, str] = {}
     for measure in P.measures(mapping):
         name = text(measure.get("name"))
         tables = measure.get("tables") or []
-        home = _clean_table_name(text(tables[0])) if tables else _clean_table_name(text(as_dict(measure.get("fabric")).get("table")))
+        raw_tbl = text(tables[0]) if tables else text(as_dict(measure.get("fabric")).get("table"))
+        home_candidate = _clean_table_name(raw_tbl) if raw_tbl else ""
+        home = home_candidate if home_candidate in known_tables else "_Measures"
         if name:
-            measure_home[name] = home or "_Measures"
+            measure_home[name] = home
 
     column_home: Dict[str, str] = {}
     field_resolver: Dict[str, Tuple[str, str]] = {}
@@ -98,24 +106,18 @@ def _entity_maps(mapping: Dict[str, Any]):
         elif dim_table and name:
             table_cols = [c for c, t in column_home.items() if t == dim_table]
             base_name = _extract_base_field(name)
-            matched_col = None
-            for c in table_cols:
-                if c.lower() == name.lower() or c.lower() == base_name.lower():
-                    matched_col = c
-                    break
-            if not matched_col:
-                for c in table_cols:
-                    if c.lower() in name.lower() or name.lower() in c.lower():
-                        matched_col = c
-                        break
-            final_col = matched_col or (base_name if base_name in table_cols else (table_cols[0] if table_cols else name))
-            nl = name.lower()
-            field_resolver[nl] = (dim_table, final_col)
-            field_resolver[nl.replace("_", " ")] = (dim_table, final_col)
-            field_resolver[nl.replace(" ", "_")] = (dim_table, final_col)
-            if base_name:
-                bl = base_name.lower()
-                field_resolver[bl] = (dim_table, final_col)
+            matched = difflib.get_close_matches(base_name, table_cols, n=1, cutoff=0.6) if table_cols else []
+            if matched:
+                field_resolver[name.lower()] = (dim_table, matched[0])
+                if name not in column_home:
+                    column_home[name] = dim_table
+
+    # 3. Map all master measures explicitly
+    for measure in P.measures(mapping):
+        name = text(measure.get("name")).strip()
+        if name:
+            home = measure_home.get(name, "_Measures")
+            field_resolver[name.lower()] = (home, name)
 
     return measure_home, column_home, field_resolver
 
@@ -137,8 +139,9 @@ def _auto_register_expression_labels(
         if name and name not in measure_home:
             tables = m.get("tables") or []
             from app.model.table_tmdl import _clean_table_name
-            home = _clean_table_name(text(tables[0])) if tables else "_Measures"
-            measure_home[name] = home or "_Measures"
+            raw_tbl = text(tables[0]) if tables else ""
+            home_cand = _clean_table_name(raw_tbl) if raw_tbl else ""
+            measure_home[name] = home_cand if (home_cand and home_cand != "Table") else "_Measures"
 
     # Then scan all visual y_axis / measures fields for unresolved labels
     for visual in P.visuals(mapping):
@@ -162,6 +165,31 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
     measure_home, column_home, field_resolver = _entity_maps(mapping)
     _auto_register_expression_labels(mapping, measure_home, column_home)
 
+    # Process report-level and page-level filters from mapping
+    raw_filters = as_list(mapping.get("filters")) or as_list(mapping.get("filter_panes"))
+    report_filters: List[Dict[str, Any]] = []
+    page_filters_by_sheet: Dict[str, List[Dict[str, Any]]] = {}
+
+    for f in raw_filters:
+        f_dict = as_dict(f)
+        fabric_f = as_dict(f_dict.get("fabric"))
+        target_t = fabric_f.get("target_table")
+        target_c = fabric_f.get("target_column")
+        f_sheet = fabric_f.get("sheet_name") or f_dict.get("sheet_name")
+
+        if not (target_t and target_c):
+            fld = text(f_dict.get("field") or f_dict.get("name"))
+            if fld and fld.lower() in field_resolver:
+                target_t, target_c = field_resolver[fld.lower()]
+
+        if target_t and target_c:
+            fname = lineage_tag(f"filt:{target_t}:{target_c}")[:20]
+            built_f = _field_filter(fname, target_t, target_c)
+            if f_sheet and fabric_f.get("filter_scope") == "page":
+                page_filters_by_sheet.setdefault(f_sheet, []).append(built_f)
+            else:
+                report_filters.append(built_f)
+
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for visual in visuals:
         grouped.setdefault(_sheet_key(visual), []).append(visual)
@@ -174,8 +202,12 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
         for index, title in enumerate(page_titles)
     }
 
+    report_doc = json.loads(_report_json())
+    if report_filters:
+        report_doc["filterConfig"] = {"filters": report_filters}
+
     files: Dict[str, str] = {
-        "definition/report.json": _report_json(),
+        "definition/report.json": json.dumps(report_doc, indent=2),
         # Desktop refuses a PBIR report with no version marker.
         "definition/version.json": json.dumps(
             {"$schema": S.VERSION_METADATA, "version": S.REPORT_VERSION}, indent=2
@@ -276,6 +308,9 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
                     }
                 }]
             }
+
+        if sheet_name in page_filters_by_sheet and page_filters_by_sheet[sheet_name]:
+            page_doc["filterConfig"] = {"filters": page_filters_by_sheet[sheet_name]}
 
         files[f"definition/pages/{page_id}/page.json"] = json.dumps(page_doc, indent=2)
 

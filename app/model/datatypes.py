@@ -26,7 +26,9 @@ NUMERIC_KEYWORDS = {
     "discount", "balance", "score", "weight", "avg", "min", "max", "value", "entryprice",
     "exitprice", "lastprice", "bidprice", "askprice", "openprice", "highprice", "lowprice",
     "pricechange", "pricechangepercent", "weightedavgprice", "prevcloseprice", "lastqty",
-    "bidqty", "askqty", "units", "gpa", "credits", "grade_point", "salary", "bonus", "fee", "tax"
+    "bidqty", "askqty", "units", "gpa", "credits", "grade_point", "salary", "bonus", "fee", "tax",
+    "miles", "distance", "gallons", "mpg", "hours", "minutes", "mileage", "pieces", "duration",
+    "potential", "charges", "surcharge", "efficiency", "odometer"
 }
 
 DATETIME_KEYWORDS = {
@@ -53,8 +55,15 @@ def infer_type_from_name(col_name: str) -> Optional[str]:
         return "string"
     if clean in INTEGER_KEYWORDS or clean.endswith("year") or clean.endswith("count"):
         return "int64"
-    if clean in NUMERIC_KEYWORDS or any(clean.endswith(kw) or clean.startswith(kw) for kw in ("price", "qty", "quantity", "volume", "amount", "rate", "percent", "cost", "profit", "loss", "revenue", "sales", "discount", "balance", "fee", "tax")):
-        if not clean.endswith("id"):
+    if clean in NUMERIC_KEYWORDS or any(
+        kw in clean for kw in (
+            "price", "qty", "quantity", "volume", "amount", "rate", "percent", "cost",
+            "profit", "loss", "revenue", "sales", "discount", "balance", "fee", "tax",
+            "miles", "distance", "gallons", "mpg", "hours", "minutes", "mileage", "pieces",
+            "weight", "charge", "surcharge", "potential", "odometer"
+        )
+    ):
+        if not (clean.endswith("id") or clean.endswith("code") or clean.endswith("state") or clean.endswith("city")):
             return "double"
     if clean in DATETIME_KEYWORDS or clean.endswith("date"):
         return "dateTime"
@@ -68,7 +77,7 @@ def to_tmdl_type(raw: Any, col_name: str = "") -> str:
     if col_name:
         inferred = infer_type_from_name(col_name)
         if inferred:
-            if value in ("string", "text", "", "STRING", "TEXT"):
+            if value.lower() in ("string", "text", ""):
                 return inferred
             if inferred == "string" and any(k in col_name.lower() for k in ("band", "tier", "bucket", "bracket", "status", "type", "name", "category", "desc", "label")):
                 return "string"

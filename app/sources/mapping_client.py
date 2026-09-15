@@ -126,7 +126,9 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
             except ValueError:
                 continue
 
-            for row in reversed(rows):  # newest last
+            best_row = None
+            best_score = -1
+            for row in rows:
                 if not isinstance(row, dict):
                     continue
                 mapping = row.get("mapping_result")
@@ -140,8 +142,19 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
                         "app_id=%r run_id=%r.", url, app_id, run_id,
                     )
                     continue
-                logger.info("Loaded mapping from %s", url)
-                return row
+                m_dict = mapping if isinstance(mapping, dict) else row
+                score = (
+                    len(m_dict.get("tables") or []) * 10
+                    + len(m_dict.get("measures") or []) * 5
+                    + len(m_dict.get("visuals") or []) * 20
+                )
+                if score >= best_score:
+                    best_score = score
+                    best_row = row
+
+            if best_row is not None:
+                logger.info("Loaded mapping from %s (score=%d)", url, best_score)
+                return best_row
 
     detail = (
         f" {rejected} document(s) were returned but belonged to a different app/run."

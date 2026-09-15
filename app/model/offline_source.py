@@ -118,7 +118,8 @@ def _columns(table: Dict[str, Any]) -> List[Tuple[str, str]]:
         data_type = to_tmdl_type(
             column.get("fabric_datatype") or column.get("data_type")
             or column.get("qlik_datatype") or column.get("dataType")
-            or column.get("type")
+            or column.get("type"),
+            col_name=name,
         )
         resolved.append((name, data_type))
     return resolved

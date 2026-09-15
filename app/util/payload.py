@@ -27,15 +27,72 @@ def text(value: Any, default: str = "") -> str:
 def unwrap_mapping(document: Any) -> Dict[str, Any]:
     """Accept a raw mapping result or a stored {mapping_result: ...} / {parsing_result: ...} row."""
     doc = as_dict(document)
+    res = doc
     if isinstance(doc.get("mapping_result"), dict) and doc["mapping_result"]:
-        return doc["mapping_result"]
-    if isinstance(doc.get("parsing_result"), dict) and doc["parsing_result"]:
+        res = dict(doc["mapping_result"])
+    elif isinstance(doc.get("parsing_result"), dict) and doc["parsing_result"]:
         res = dict(doc["parsing_result"])
-        for k in ("app_id", "app_name", "run_id", "space_id", "workspace_id", "source_type"):
-            if k in doc and k not in res:
-                res[k] = doc[k]
-        return res
-    return doc
+
+    for k in ("app_id", "app_name", "run_id", "space_id", "workspace_id", "source_type"):
+        if k in doc and k not in res:
+            res[k] = doc[k]
+
+    # Normalize tables & attach flat columns if present
+    flat_cols = res.get("columns")
+    cols_by_table: Dict[str, List[Dict[str, Any]]] = {}
+    if isinstance(flat_cols, list):
+        for c in flat_cols:
+            if isinstance(c, dict):
+                tbl = str(c.get("fabric_table") or c.get("qlik_table") or "").strip().lower()
+                if tbl:
+                    col_dict = dict(c)
+                    if "fabric_column" in col_dict and "fabric_column_name" not in col_dict:
+                        col_dict["fabric_column_name"] = col_dict["fabric_column"]
+                    if "qlik_column" in col_dict and "qlik_column_name" not in col_dict:
+                        col_dict["qlik_column_name"] = col_dict["qlik_column"]
+                    if "target_data_type" in col_dict and "fabric_datatype" not in col_dict:
+                        col_dict["fabric_datatype"] = col_dict["target_data_type"]
+                    cols_by_table.setdefault(tbl, []).append(col_dict)
+
+    tbls = res.get("tables")
+    if isinstance(tbls, list):
+        for t in tbls:
+            if isinstance(t, dict):
+                t_name = str(t.get("fabric_table_name") or t.get("qlik_table_name") or t.get("name") or t.get("table_name") or "").strip()
+                if t_name and not t.get("name"):
+                    t["name"] = t_name
+                if t_name and not t.get("table_name"):
+                    t["table_name"] = t_name
+                if not t.get("columns") and t_name and t_name.lower() in cols_by_table:
+                    t["columns"] = cols_by_table[t_name.lower()]
+                if t.get("source_query") and not t.get("qlik_query"):
+                    t["qlik_query"] = t["source_query"]
+
+    # Normalize measures
+    meas = res.get("measures") or res.get("dax_measures")
+    if isinstance(meas, list):
+        for m in meas:
+            if isinstance(m, dict):
+                m_name = str(m.get("fabric_measure_name") or m.get("qlik_measure_name") or m.get("name") or "").strip()
+                if m_name and not m.get("name"):
+                    m["name"] = m_name
+                m_dax = str(m.get("dax") or m.get("dax_expression") or m.get("target_expression") or "").strip()
+                if m_dax and not m.get("dax_expression"):
+                    m["dax_expression"] = m_dax
+
+    # Normalize visuals
+    vis = res.get("visuals")
+    if isinstance(vis, list):
+        for v in vis:
+            if isinstance(v, dict):
+                sheet = v.get("sheet") or v.get("sheet_name")
+                if sheet and not v.get("sheet_name"):
+                    v["sheet_name"] = sheet
+                v_type = v.get("power_bi_visual_type") or v.get("qlik_visual_type") or v.get("type")
+                if v_type and not v.get("type"):
+                    v["type"] = v_type
+
+    return res
 
 
 def app_identity(mapping: Dict[str, Any]) -> Dict[str, Any]:

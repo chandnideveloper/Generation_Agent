@@ -62,6 +62,16 @@ def _categorical_filter(
     }
 
 
+def _field_filter(name: str, entity: str, prop: str) -> Dict[str, Any]:
+    """A categorical filter placing a column on the filter pane."""
+    return {
+        "name": name,
+        "field": _field_ref(entity, prop),
+        "type": "Categorical",
+        "howCreated": "Auto",
+    }
+
+
 def _top_n_filter(
     name: str, entity: str, prop: str, count: int, direction: str,
     order_entity: Optional[str], order_prop: Optional[str],

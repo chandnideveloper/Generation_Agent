@@ -163,6 +163,19 @@ def _qlik_expr_to_dax(expr: str, table_name: str) -> str:
         return f"RELATED('{dim_tb}'[{key_col}])"
 
     # 4. Date / Month / Year / Week functions
+    if "monthstart" in cleaned.lower():
+        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned)
+        col = m_col.group(1) if m_col else "dispatch_date"
+        return f"DATE(YEAR('{table_name}'[{col}]), MONTH('{table_name}'[{col}]), 1)"
+    if "monthname" in cleaned.lower():
+        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned)
+        col = m_col.group(1) if m_col else "dispatch_date"
+        return f"FORMAT('{table_name}'[{col}], \"mmmm\")"
+    if "num(month(" in cleaned.lower() or "num(monthstart(" in cleaned.lower():
+        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned)
+        col = m_col.group(1) if m_col else "dispatch_date"
+        return f"MONTH('{table_name}'[{col}])"
+
     m_func = re.match(r"(date|month|year|week|num)\s*\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned, re.IGNORECASE)
     if m_func:
         func, col = m_func.group(1).lower(), m_func.group(2)
@@ -195,6 +208,7 @@ def build_column(
     column: Dict[str, Any],
     table: str,
     extracted_exprs: Optional[Dict[str, str]] = None,
+    sql_select_cols: Optional[Set[str]] = None,
 ) -> str:
     """One TMDL column block."""
     name = _column_name(column)
@@ -209,9 +223,15 @@ def build_column(
     lines: List[str] = []
     is_calc = _is_calculated(column, extracted_exprs, table_name=table)
     dax_expr = ""
+
+    if name.lower() in ("longitude_latitude", "latitude_longitude"):
+        is_calc = True
+        dax_expr = f"'{table}'[longitude] & \", \" & '{table}'[latitude]"
+        data_type = "string"
+
     if is_calc:
         fabric = as_dict(column.get("fabric"))
-        dax_expr = text(column.get("dax_expression") or fabric.get("dax_expression"))
+        dax_expr = text(column.get("dax_expression") or fabric.get("dax_expression")) or dax_expr
         if not dax_expr or dax_expr.startswith("="):
             qlik_expr = column.get("qlik_expression") or (
                 extracted_exprs.get(name.lower()) if extracted_exprs else None
@@ -222,7 +242,13 @@ def build_column(
         if not dax_expr or dax_expr.strip().lower() in (
             f"'{table}'[{name}]".lower(), f"[{name}]".lower(), "blank()"
         ):
-            is_calc = False
+            if name.lower() not in ("longitude_latitude", "latitude_longitude"):
+                is_calc = False
+
+    if not is_calc and sql_select_cols is not None:
+        if name.lower() not in sql_select_cols and source.lower() not in sql_select_cols:
+            is_calc = True
+            dax_expr = "BLANK()"
 
     if is_calc and dax_expr and not dax_expr.startswith("="):
         lines.append(f"{INDENT}column {quote_tmdl(name)} = {dax_expr}")
@@ -286,54 +312,82 @@ def _to_snake_case(name: str) -> str:
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s).lower()
 
 
-def _format_m_steps(steps: List[str]) -> str:
-    if not steps:
+def _format_m_steps(raw_input: Any) -> str:
+    if not raw_input:
         return ""
-    clean_steps = [s.strip() for s in steps if s and s.strip()]
-    if not clean_steps:
-        return ""
+    if isinstance(raw_input, list):
+        clean_lines = []
+        for item in raw_input:
+            if isinstance(item, dict):
+                c = item.get("content") or item.get("step_content") or item.get("text")
+                if c:
+                    clean_lines.append(str(c).strip())
+            elif isinstance(item, str) and item.strip():
+                clean_lines.append(item.strip())
+        text_content = "\n".join(clean_lines)
+    else:
+        text_content = str(raw_input).strip()
 
-    final_identifier = None
-    processed_steps = []
-
-    for s in clean_steps:
-        s_clean = s.strip()
-        if s_clean.lower().startswith("let ") or s_clean.lower() == "let":
-            s_clean = s_clean[3:].strip() if s_clean.lower().startswith("let ") else ""
-        if " in " in s_clean.lower() or s_clean.lower().startswith("in "):
-            parts = re.split(r"\s+in\s+", s_clean, flags=re.IGNORECASE)
-            if len(parts) == 2:
-                s_clean = parts[0].strip()
-                final_identifier = parts[1].strip()
-            elif s_clean.lower().startswith("in "):
-                final_identifier = s_clean[3:].strip()
-                s_clean = ""
-        if s_clean:
-            processed_steps.append(s_clean)
-
-    if not processed_steps:
+    if not text_content:
         return ""
 
-    if not final_identifier:
-        last_step_match = re.match(r"^([#\"a-zA-Z0-9_\s]+)\s*=", processed_steps[-1])
-        final_identifier = last_step_match.group(1).strip() if last_step_match else processed_steps[-1].split("=")[0].strip()
+    # Extract 'in ...' from the end if present
+    in_match = re.search(r'\s+in\s+([#\"a-zA-Z0-9_\s\.\-]+)$', text_content, flags=re.IGNORECASE)
+    if in_match:
+        final_expr = in_match.group(1).strip()
+        body = text_content[:in_match.start()].strip()
+    else:
+        final_expr = None
+        body = text_content
 
-    step_lines = []
-    for i, step in enumerate(processed_steps):
-        step_stripped = step.rstrip(",")
-        lines = step_stripped.splitlines()
-        indented_lines = []
-        for j, l in enumerate(lines):
-            indented_lines.append(f"    {l.strip()}" if j > 0 else f"    {l}")
-        step_body = "\n".join(indented_lines)
-        if i < len(processed_steps) - 1:
-            step_lines.append(f"{step_body},")
+    # Remove leading 'let'
+    if body.lower().startswith("let"):
+        body = re.sub(r'^let\s*', '', body, flags=re.IGNORECASE).strip()
+
+    # Split body into steps.
+    # A step starts with: (identifier or #"quoted identifier") = (not ==)
+    step_start_regex = re.compile(r'^(#"[^"]+"|[_a-zA-Z][_a-zA-Z0-9]*)\s*=(?!=)')
+
+    steps = []
+    current_step_lines = []
+
+    for line in body.splitlines():
+        trimmed_l = line.strip()
+        if not trimmed_l:
+            continue
+        if step_start_regex.match(trimmed_l) and current_step_lines:
+            steps.append("\n".join(current_step_lines).strip())
+            current_step_lines = [trimmed_l]
         else:
-            step_lines.append(step_body)
+            current_step_lines.append(line)
 
-    return "let\n" + "\n".join(step_lines) + f"\nin\n    {final_identifier}"
+    if current_step_lines:
+        steps.append("\n".join(current_step_lines).strip())
 
+    if not steps:
+        return text_content
 
+    # If final_expr wasn't explicitly found, deduce it from the last step's target
+    if not final_expr:
+        last_m = step_start_regex.match(steps[-1])
+        if last_m:
+            final_expr = last_m.group(1).strip()
+        else:
+            final_expr = "Source"
+
+    # Format each step: remove trailing comma, format indentation
+    formatted_steps = []
+    for i, step in enumerate(steps):
+        step_clean = step.rstrip().rstrip(",")
+        lines = step_clean.splitlines()
+        first_line = "    " + lines[0].strip()
+        other_lines = ["        " + l.strip() for l in lines[1:]]
+        step_body = "\n".join([first_line] + other_lines)
+        if i < len(steps) - 1:
+            step_body += ","
+        formatted_steps.append(step_body)
+
+    return "let\n" + "\n".join(formatted_steps) + f"\nin\n    {final_expr}"
 
 
 def _is_circular_self_reference(mquery_str: str, table_name: str) -> bool:
@@ -358,29 +412,12 @@ def _extract_mquery_from_payload(table: Dict[str, Any], table_name: str = "") ->
         fabric.get("power_query"),
     ]
     for c in candidates:
-        if isinstance(c, list) and c:
-            step_contents = []
-            for item in c:
-                if isinstance(item, dict):
-                    content = item.get("content") or item.get("step_content") or item.get("text")
-                    if content:
-                        step_contents.append(str(content).strip())
-                elif isinstance(item, str) and item.strip():
-                    step_contents.append(item.strip())
-            if step_contents:
-                formatted = _format_m_steps(step_contents)
-                if formatted and not re.search(r"Table\.FromRows\(\s*\{\s*\}\s*,", formatted):
-                    if not _is_circular_self_reference(formatted, t_name):
-                        return _fix_relative_folder_paths(formatted, table)
-        elif isinstance(c, str) and c.strip():
-            raw_str = c.strip()
-            if not re.search(r"Table\.FromRows\(\s*\{\s*\}\s*,", raw_str):
-                if not raw_str.lower().startswith("let") and "=" in raw_str:
-                    formatted = _format_m_steps(raw_str.splitlines())
-                    if not _is_circular_self_reference(formatted, t_name):
-                        return _fix_relative_folder_paths(formatted, table)
-                elif not _is_circular_self_reference(raw_str, t_name):
-                    return _fix_relative_folder_paths(raw_str, table)
+        if not c:
+            continue
+        formatted = _format_m_steps(c)
+        if formatted and not re.search(r"Table\.FromRows\(\s*\{\s*\}\s*,", formatted):
+            if not _is_circular_self_reference(formatted, t_name):
+                return _fix_relative_folder_paths(formatted, table)
     return None
 
 
@@ -588,13 +625,85 @@ def _mquery(
 
 
 
+def strip_table_prefixes_in_m(m_query: str, table_name: str, columns: List[Dict[str, Any]]) -> str:
+    """
+    Replace occurrences of 'TableName.ColumnName' with 'ColumnName' in M queries.
+    STRICT RULE: Only strip if the prefix matches the actual TableName.
+    Preserves dotted columns like "year.month" while fixing "MyTable.ID".
+    Ported from vl-q2f-report-generation/app/agents/tmdl_generator.py.
+    """
+    if not m_query or not table_name:
+        return m_query
+
+    valid_cols = set()
+    for col in columns or []:
+        if isinstance(col, dict):
+            for key in ("name", "sourceColumn", "field_name", "fabric_column_name", "qlik_column_name"):
+                val = col.get(key)
+                if val:
+                    simple = str(val).split(".")[-1]
+                    valid_cols.add(simple.upper())
+
+    if not valid_cols:
+        return m_query
+
+    tbl_variants = {
+        table_name.upper(),
+        table_name.replace(" ", "").replace("_", "").upper(),
+        _clean_table_name(table_name).upper(),
+    }
+
+    # 1) Fix string literals in column lists: "Table.Col" -> "Col"
+    def repl_string(match: re.Match) -> str:
+        full = match.group(0)
+        tbl = match.group("tbl")
+        col = match.group("col")
+        if tbl.upper() not in tbl_variants:
+            return full
+        if col.upper() in valid_cols:
+            return f'"{col}"'
+        return full
+
+    m_query = re.sub(
+        r'"(?P<tbl>[A-Za-z0-9_]+)\.(?P<col>[A-Za-z0-9_]+)"',
+        repl_string,
+        m_query,
+    )
+
+    # 2) Fix column references: [Table.Col] -> [Col]
+    def repl_bracket(match: re.Match) -> str:
+        tbl = match.group("tbl")
+        col = match.group("col")
+        if tbl.upper() not in tbl_variants:
+            return match.group(0)
+        if col.upper() in valid_cols:
+            return f"[{col}]"
+        return match.group(0)
+
+    m_query = re.sub(
+        r'\[(?P<tbl>[A-Za-z0-9_]+)\.(?P<col>[A-Za-z0-9_]+)\]',
+        repl_bracket,
+        m_query,
+    )
+
+    return m_query
+
+
 def build_table(table: Dict[str, Any], valid_table_names: Optional[Set[str]] = None) -> str:
     """A complete table.tmdl document."""
     raw_name = text(table.get("name") or table.get("table_name"), "Table")
     name = _clean_table_name(raw_name)
     columns = as_list(table.get("columns")) or as_list(table.get("fields"))
-    qlik_query = text(table.get("qlik_query") or table.get("query_text"))
+    qlik_query = text(table.get("qlik_query") or table.get("source_query") or table.get("query_text"))
     extracted_exprs = _extract_column_expressions(qlik_query)
+
+    partition_query = _mquery(table, name, valid_table_names, extracted_exprs)
+    partition_query = strip_table_prefixes_in_m(partition_query, name, columns)
+
+    sql_select_cols = None
+    m_sql = re.search(r'Value\.NativeQuery\([^,]+,\s*"SELECT\s+(.+?)\s+FROM', partition_query, re.IGNORECASE | re.DOTALL)
+    if m_sql and 'SELECT *' not in m_sql.group(0).upper():
+        sql_select_cols = {c.strip().split()[-1].split('.')[-1].lower() for c in m_sql.group(1).split(',')}
 
     lines = [f"table {quote_tmdl(name)}", f"{INDENT}lineageTag: {lineage_tag(f'table:{name}')}", ""]
 
@@ -606,10 +715,9 @@ def build_table(table: Dict[str, Any], valid_table_names: Optional[Set[str]] = N
             if col_name_lower in seen_columns:
                 continue
             seen_columns.add(col_name_lower)
-            lines.append(build_column(column, name, extracted_exprs))
+            lines.append(build_column(column, name, extracted_exprs, sql_select_cols=sql_select_cols))
             lines.append("")
 
-    partition_query = _mquery(table, name, valid_table_names, extracted_exprs)
     lines.append(f"{INDENT}partition {quote_tmdl(name)} = m")
     lines.append(f"{INDENT*2}mode: import")
     lines.append(f"{INDENT*2}source =")

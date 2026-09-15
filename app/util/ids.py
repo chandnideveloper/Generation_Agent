@@ -83,3 +83,15 @@ def slug(name: str, fallback: str = "item") -> str:
     """Lowercase, hyphenated identifier for folder names."""
     text = re.sub(r"[^A-Za-z0-9]+", "-", str(name or "")).strip("-").lower()
     return text or fallback
+
+
+def make_safe_m_var(name: str) -> str:
+    """
+    Ensure M step variable name starts with a letter or underscore.
+    Tableau/Qlik tables starting with numbers (e.g., '14_Orders') are prefixed with 'raw_'
+    to prevent Power Query syntax errors.
+    """
+    cleaned = re.sub(r'[^A-Za-z0-9_]', '_', str(name or "")).strip("_")
+    if not cleaned or not re.match(r'^[A-Za-z_]', cleaned):
+        return f"raw_{cleaned}" if cleaned else "raw_table"
+    return cleaned

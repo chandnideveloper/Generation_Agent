@@ -94,6 +94,35 @@ def build_parameters_tmdl(mapping: Dict[str, Any]) -> Optional[str]:
 
     rows_str = ",\n\t\t\t            ".join(m_rows)
 
+    # Generate DAX bridge measures for each unique parameter so any measure referencing [vParam] resolves directly
+    unique_params = []
+    seen_params = set()
+    for p, v, l, o in rows:
+        if p not in seen_params:
+            seen_params.add(p)
+            unique_params.append((p, v))
+
+    measures_tmdl_parts = []
+    for p, default_val in unique_params:
+        p_esc = p.replace('"', '""')
+        m_tag = lineage_tag(f"measure:Parameters.{p}")
+        mv_tag = lineage_tag(f"measure:Parameters.{p}_Value")
+        measures_tmdl_parts.append(f"""\tmeasure '{p}' = 
+\t\tVAR _paramVal = LOOKUPVALUE('Parameters'[Value], 'Parameters'[Parameter], "{p_esc}")
+\t\tRETURN IF(ISBLANK(_paramVal), BLANK(), IF(ISNUMBER(VALUE(_paramVal)), VALUE(_paramVal), _paramVal))
+\t\tlineageTag: {m_tag}
+
+\tmeasure '{p} Value' = 
+\t\tVAR _sel = SELECTEDVALUE('Parameters'[Value])
+\t\tVAR _def = LOOKUPVALUE('Parameters'[Value], 'Parameters'[Parameter], "{p_esc}")
+\t\tVAR _active = COALESCE(_sel, _def)
+\t\tRETURN IF(ISBLANK(_active), BLANK(), IF(ISNUMBER(VALUE(_active)), VALUE(_active), _active))
+\t\tlineageTag: {mv_tag}""")
+
+    measures_tmdl_str = "\n\n".join(measures_tmdl_parts)
+    if measures_tmdl_str:
+        measures_tmdl_str = "\n" + measures_tmdl_str + "\n"
+
     tmdl = f"""table Parameters
 \tlineageTag: {lineage_tag("table:Parameters")}
 
@@ -128,7 +157,7 @@ def build_parameters_tmdl(mapping: Dict[str, Any]) -> Optional[str]:
 \t\tsourceColumn: Order
 
 \t\tannotation SummarizationSetBy = Automatic
-
+{measures_tmdl_str}
 \tpartition Parameters = m
 \t\tmode: import
 \t\tsource =

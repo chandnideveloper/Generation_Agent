@@ -484,6 +484,21 @@ def build_visual(
             }
         }]
 
+    # Apply data point and slice colors to visual objects
+    if single_color and single_color.lower() not in ("default", "none", "auto", ""):
+        color_val = single_color if single_color.startswith("#") or single_color.startswith("rgb") else f"#{single_color}"
+        color_expr = {"solid": {"color": {"expr": {"Literal": {"Value": f"'{color_val}'"}}}}}
+        if visual_type in (
+            "barChart", "columnChart", "clusteredBarChart", "clusteredColumnChart",
+            "lineChart", "areaChart", "stackedAreaChart", "pieChart", "donutChart",
+            "funnel", "waterfallChart", "gauge", "treemap"
+        ):
+            objects["dataPoint"] = [{
+                "properties": {
+                    "fill": color_expr
+                }
+            }]
+
     # ── actionButton: add text, fill, outline, and action objects ────────────
     if visual_type == "actionButton":
         btn_action_data = (

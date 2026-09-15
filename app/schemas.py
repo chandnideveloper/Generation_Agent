@@ -88,6 +88,13 @@ class GenerateRequest(BaseModel):
             if fg_id and not str(fg_id).startswith("{{") and str(fg_id).strip():
                 data["workspace_id"] = str(fg_id).strip()
 
+            ws_id = data.get("workspace_id")
+            if ws_id and isinstance(ws_id, str):
+                import re
+                m = re.search(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", ws_id)
+                if m:
+                    data["workspace_id"] = m.group(0)
+
             # Normalize git token / pat
             tok = data.get("git_pat") or data.get("github_pat") or data.get("git_token") or data.get("token") or data.get("pat")
             if tok and not str(tok).startswith("{{") and str(tok).strip():
