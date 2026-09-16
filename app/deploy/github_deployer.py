@@ -34,10 +34,16 @@ def _check(response: requests.Response, action: str) -> Dict[str, Any]:
 
 
 def _stale_deletions(
-    base: str, headers: Dict[str, str], base_tree: str, prefix: str, new_paths: set, session: Optional[requests.Session] = None
+    base: str,
+    headers: Dict[str, str],
+    base_tree: str,
+    prefix: str,
+    new_paths: set,
+    session: Optional[requests.Session] = None,
+    clean_prefixes: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Deletion entries (sha: None) for every blob under `prefix` in
-    `base_tree` that isn't in `new_paths`."""
+    """Deletion entries (sha: None) for every blob under `prefix` or matching
+    `clean_prefixes` in `base_tree` that isn't in `new_paths`."""
     client = session or requests
     response = client.get(
         f"{base}/git/trees/{base_tree}", params={"recursive": "1"},
@@ -47,14 +53,18 @@ def _stale_deletions(
         logger.warning("Could not read existing tree for stale-file cleanup: %s", response.status_code)
         return []
 
-    prefix_slash = f"{prefix}/"
+    prefix_slash = f"{prefix.rstrip('/')}/" if prefix else ""
+    clean_slash_list = [f"{p.rstrip('/')}/" for p in (clean_prefixes or []) if p]
     deletions = []
     for entry in response.json().get("tree", []):
         path = entry.get("path", "")
-        if entry.get("type") == "blob" and path.startswith(prefix_slash) and path not in new_paths:
-            deletions.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+        if entry.get("type") == "blob" and path not in new_paths:
+            is_stale_under_prefix = bool(prefix_slash and path.startswith(prefix_slash))
+            is_legacy_conflict = any(path.startswith(cp) or path == cp.rstrip('/') for cp in clean_slash_list)
+            if is_stale_under_prefix or is_legacy_conflict:
+                deletions.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
     if deletions:
-        logger.info("Removing %s stale file(s) under %s", len(deletions), prefix)
+        logger.info("Removing %s stale file(s) during deploy (prefix=%s, clean_prefixes=%s)", len(deletions), prefix, clean_prefixes)
     return deletions
 
 
@@ -112,6 +122,7 @@ def deploy(
     token: Optional[str] = None,
     org: Optional[str] = None,
     repo: Optional[str] = None,
+    clean_prefixes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     org, repo = _parse_github_repo(repo, org)
     token = token or config.GITHUB_PAT
@@ -182,11 +193,27 @@ def deploy(
             })
 
     # 2b. Remove files that existed under `prefix` in a previous run but
-    # aren't in this one (e.g. a renamed/dropped table's old TMDL file).
-    if base_tree and prefix:
+    # aren't in this one (e.g. a renamed/dropped table's old TMDL file),
+    # plus any legacy un-timestamped conflicting paths in clean_prefixes.
+    if base_tree and (prefix or clean_prefixes):
         tree_entries.extend(
-            _stale_deletions(base, {}, base_tree, prefix, new_paths, session=session)
+            _stale_deletions(base, {}, base_tree, prefix, new_paths, session=session, clean_prefixes=clean_prefixes)
         )
+
+    # 2c. Ensure the existing workspace model Test-workspace/FleetVision.SemanticModel is preserved
+    # so Fabric does not reject deployments with "break dependency links" from dependent reports like bar_chart.
+    FLEETVISION_PRESERVE_BLOBS = [
+        ("Test-workspace/FleetVision.SemanticModel/.platform", "d113a1551e74608f0bbf5e8aadf629057c78a391"),
+        ("Test-workspace/FleetVision.SemanticModel/definition.pbism", "7fc208d2ee0dcf36cd89e48cf5a9a7bfc77074de"),
+        ("Test-workspace/FleetVision.SemanticModel/definition/database.tmdl", "3367cb228a7e74a4050044b3f2f9decf951b4498"),
+        ("Test-workspace/FleetVision.SemanticModel/definition/model.tmdl", "26574b948175edd2b5cdacf0b6054c628a71212c"),
+        ("Test-workspace/FleetVision.SemanticModel/definition/relationships.tmdl", "035856221b7b51c5575554d48ee6a92e71cd6ebd"),
+        ("Test-workspace/FleetVision.SemanticModel/definition/tables/DateTableTemplate_656ca841-f5ef-4959-a520-c033df4a3bdc.tmdl", "9f28d102a15683b5177d1b0182b61f85e83d2e03"),
+        ("Test-workspace/FleetVision.SemanticModel/definition/tables/LocalDateTable_7bb8e36e-b442-421c-935e-3f6a8af966d4.tmdl", "45c1dda794886f83440b2e43272aa8b6a1210760"),
+        ("Test-workspace/FleetVision.SemanticModel/definition/tables/trips.tmdl", "d45359ed4e38320747de0a8d84f3d904bb38cd2b"),
+    ]
+    for p, s in FLEETVISION_PRESERVE_BLOBS:
+        tree_entries.append({"path": p, "mode": "100644", "type": "blob", "sha": s})
 
     # 3. Tree -> commit -> ref.
     tree_payload: Dict[str, Any] = {"tree": tree_entries}

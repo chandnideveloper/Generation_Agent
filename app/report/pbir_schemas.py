@@ -40,3 +40,6 @@ THEME_VERSIONS = {"visual": "2.4.0", "report": "3.0.0", "page": "2.3.0"}
 
 BASE_THEME_NAME = "CY24SU10"
 BASE_THEME_PATH = f"BaseThemes/{BASE_THEME_NAME}.json"
+
+QLIK_THEME_NAME = "QlikAppTheme"
+QLIK_THEME_PATH = f"BaseThemes/{QLIK_THEME_NAME}.json"

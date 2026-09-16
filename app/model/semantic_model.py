@@ -70,15 +70,14 @@ def _culture_tmdl() -> str:
     )
 
 
+from app.templates.loader import get_static_template
+
+
 def _platform(display_name: str, kind: str) -> str:
-    return json.dumps({
-        "$schema": S.PLATFORM,
-        "metadata": {"type": kind, "displayName": display_name},
-        # An empty logicalId makes Fabric Git integration reject the item, and
-        # a random one would change on every run — so it is derived from the
-        # item identity and stays stable across regenerations.
-        "config": {"version": "2.0", "logicalId": lineage_tag(f"{kind}:{display_name}")},
-    }, indent=2)
+    template = get_static_template("semantic_platform.json")
+    tag = lineage_tag(f"{kind}:{display_name}")
+    content = template.replace("{app_name}", display_name).replace("{model_logical_id}", tag)
+    return content
 
 
 def build_semantic_model(
@@ -145,33 +144,11 @@ def build_semantic_model(
         "definition/model.tmdl": _model_tmdl(app_name, table_names),
         "definition/database.tmdl": _database_tmdl(),
         f"definition/cultures/{config.TMDL_CULTURE}.tmdl": _culture_tmdl(),
-        "definition.pbism": json.dumps({
-            "$schema": S.MODEL_DEFINITION_PROPERTIES,
-            "version": "4.0",
-            "settings": {},
-        }, indent=2),
-        ".pbi/localSettings.json": json.dumps({
-            "$schema": S.MODEL_LOCAL_SETTINGS,
-            "userConsent": {"compositeModel": True},
-        }, indent=2),
-        ".pbi/editorSettings.json": json.dumps({
-            "$schema": S.MODEL_EDITOR_SETTINGS,
-            "autodetectRelationships": True,
-            "parallelQueryLoading": True,
-            "typeDetectionEnabled": True,
-            "relationshipImportEnabled": True,
-            "shouldNotifyUserOfNameConflictResolution": True,
-        }, indent=2),
-        ".pbi/diagramLayout.json": json.dumps({
-            "version": "1.0.0",
-            "diagrams": [{
-                "name": "All tables", "zoomValue": 100, "isDefault": True,
-                "tables": [], "layout": {
-                    "boundingBoxWidth": 0, "boundingBoxHeight": 0,
-                    "boundingBoxPosition": {"x": 0, "y": 0}, "nodes": [],
-                },
-            }],
-        }, indent=2),
+        "definition.pbism": get_static_template("definition.pbism.json"),
+        ".pbi/localSettings.json": get_static_template("semantic_localSettings.json"),
+        ".pbi/editorSettings.json": get_static_template("editorSettings.json"),
+        ".pbi/diagramLayout.json": get_static_template("diagramLayout.json"),
+        "diagramLayout.json": get_static_template("diagramLayout.json"),
         ".platform": _platform(app_name, "SemanticModel"),
     }
     if relationships_tmdl.strip():

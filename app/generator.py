@@ -11,6 +11,7 @@ packaging and destination differ, so both targets share one code path.
 
 import datetime
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -96,11 +97,15 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
     mapping = unwrap_mapping(mapping_document)
     identity = app_identity(mapping)
 
-    # 1. Fully dynamic app_name with timestamp fallback if missing
+    # 1. Fully dynamic app_name with timestamp (%Y%m%d_%H%M%S)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    ts_str = now_utc.strftime("%Y%m%d-%H%M%S")
-    app_name_raw = request.app_name or identity.get("app_name") or f"App-{ts_str}"
-    app_name = safe_filename(app_name_raw, fallback=f"App-{ts_str}")
+    ts_str = now_utc.strftime("%Y%m%d_%H%M%S")
+    app_name_raw = request.app_name or identity.get("app_name") or "App"
+    # Clean base name by converting spaces and special characters to underscores
+    clean_base = re.sub(r'[^A-Za-z0-9]+', '_', str(app_name_raw)).strip('_')
+    # Strip any preexisting timestamp to avoid chaining timestamps on repeated runs
+    clean_base = re.sub(r'_\d{8}_\d{6}$', '', clean_base) or "App"
+    app_name = f"{clean_base}_{ts_str}"
 
     # 2. Fully dynamic run_id with timestamp + random entropy fallback if missing
     run_id = (
@@ -191,7 +196,7 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
     if request.write_to_disk and not request.push_only:
         destination = os.path.join(
             config.OUTPUT_DIR,
-            slug(app_name, fallback=f"app-{ts_str}"),
+            app_name,
             slug(run_id, fallback=f"run-{ts_str}"),
         )
         disk_write_result = pbip_packager.write_to_disk(package, destination)
@@ -241,7 +246,7 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
             "Starting deployment", request, app_name,
             f"target={request.deploy.value}, workspace={request.workspace_id or request.space_id}",
         )
-    result["deployment"] = _deploy(package, app_name, request, result, mapping=mapping)
+    result["deployment"] = _deploy(package, app_name, request, result, mapping=mapping, ts_str=ts_str)
     if request.deploy != Deploy.NONE:
         dep_status = result["deployment"].get("status", "unknown")
         _log_action_sync(
@@ -303,15 +308,24 @@ def _deploy(
     request: GenerateRequest,
     result: Dict[str, Any],
     mapping: Optional[Dict[str, Any]] = None,
+    ts_str: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the requested deployment. Failures are reported, not raised."""
     if request.deploy == Deploy.NONE:
         return {"status": "skipped", "reason": "no deployment requested"}
 
+    ts = ts_str or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if request.folder_name:
+        clean_folder = re.sub(r'_\d{8}_\d{6}$', '', str(request.folder_name)).strip('/')
+        clean_folder = re.sub(r'[^A-Za-z0-9]+', '_', clean_folder).strip('_')
+        folder_name = f"{clean_folder}_{ts}" if clean_folder else app_name
+    else:
+        folder_name = app_name
+
     prefix = "/".join(
         part for part in (
             request.department_repo or config.DESTINATION_BASE,
-            request.folder_name or slug(app_name),
+            folder_name,
         ) if part
     )
 
@@ -336,6 +350,26 @@ def _deploy(
                 package, app_name, ws, tok
             )
         if request.deploy == Deploy.GITHUB:
+            # Build list of legacy un-timestamped paths in this workspace that would cause duplicate name conflicts
+            dept = (request.department_repo or config.DESTINATION_BASE or "").strip("/")
+            raw_name = request.app_name or (mapping and app_identity(mapping).get("app_name")) or ""
+            clean_base = re.sub(r'_\d{8}_\d{6}$', '', app_name)
+            clean_pfxs = []
+            if dept and (raw_name or clean_base):
+                for candidate in filter(None, [raw_name, clean_base, "FleetVision KSA"]):
+                    clean_c = candidate.strip()
+                    # Never target bare "FleetVision" - that belongs to the user's existing bar_chart project!
+                    if clean_c.lower() in ("fleetvision", "fleet-vision"):
+                        continue
+                    clean_pfxs.extend([
+                        f"{dept}/{clean_c}.Report",
+                        f"{dept}/{clean_c}.SemanticModel",
+                        f"{dept}/{slug(clean_c)}",
+                        f"{dept}/{slug(clean_c)}.pbip",
+                        f"{dept}/{clean_c}.pbip",
+                    ])
+                clean_pfxs = list(dict.fromkeys(clean_pfxs))
+
             return github_deployer.deploy(
                 package=package,
                 prefix=prefix,
@@ -344,6 +378,7 @@ def _deploy(
                 token=request.git_pat or request.token or request.github_pat or request.pat,
                 org=request.org or request.git_org or request.github_org,
                 repo=request.repo or request.git_repo or request.github_repo,
+                clean_prefixes=clean_pfxs,
             )
         if request.deploy == Deploy.DEVOPS:
             return devops_deployer.deploy(

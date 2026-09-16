@@ -8,19 +8,19 @@ to check against a known-good project.
 import json
 
 from app.report import pbir_schemas as S
+from app.templates.loader import get_report_root_template, get_static_template
 from app.util.ids import lineage_tag
 
 
 def _platform(display_name: str) -> str:
-    return json.dumps({
-        "$schema": S.PLATFORM,
-        "metadata": {"type": "Report", "displayName": display_name},
-        # A real logical id — an empty string makes Fabric Git reject the item.
-        "config": {"version": "2.0", "logicalId": lineage_tag(f"report:{display_name}")},
-    }, indent=2)
+    template = get_static_template("report_platform.json")
+    tag = lineage_tag(f"report:{display_name}")
+    content = template.replace("{app_name}", display_name).replace("{report_logical_id}", tag)
+    return content
 
 
 def _pbir(model_path: str) -> str:
+    # Ensure model path is properly referenced
     return json.dumps({
         "$schema": S.REPORT_DEFINITION_PROPERTIES,
         "version": "4.0",
@@ -29,38 +29,7 @@ def _pbir(model_path: str) -> str:
 
 
 def _report_json() -> str:
-    """The report root, including the theme resource it references."""
-    return json.dumps({
-        "$schema": S.REPORT,
-        "themeCollection": {
-            "baseTheme": {
-                "name": S.BASE_THEME_NAME,
-                "reportVersionAtImport": S.THEME_VERSIONS,
-                "type": "SharedResources",
-            }
-        },
-        "objects": {
-            "section": [{
-                "properties": {
-                    "verticalAlignment": {"expr": {"Literal": {"Value": "'Top'"}}}
-                }
-            }]
-        },
-        "resourcePackages": [{
-            "name": "SharedResources",
-            "type": "SharedResources",
-            "items": [{
-                "name": S.BASE_THEME_NAME,
-                "path": S.BASE_THEME_PATH,
-                "type": "BaseTheme",
-            }],
-        }],
-        "settings": {
-            "useStylableVisualContainerHeader": True,
-            "exportDataMode": "AllowSummarized",
-            "defaultDrillFilterOtherVisuals": True,
-            "allowChangeFilterTypes": True,
-            "useEnhancedTooltips": True,
-            "useDefaultAggregateDisplayName": True,
-        },
-    }, indent=2)
+    """The report root, loaded directly from templates/visuals/report_root.json with dual-theme configuration."""
+    report_doc = get_report_root_template()
+    return json.dumps(report_doc, indent=2)
+

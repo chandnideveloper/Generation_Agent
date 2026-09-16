@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.report import pbir_schemas, visual_catalog
 from app.report.filters import build_filter_config, count_applied
 from app.report.projections import _aggregation_projection, _measure_projection, _names, _projection
+from app.templates.loader import get_visual_template
 from app.util.ids import lineage_tag
 from app.util.payload import as_dict, as_list, text
 
@@ -39,6 +40,11 @@ ROLES = {
     "clusteredBarChart": ("Category", "Y"),
     "clusteredColumnChart": ("Category", "Y"),
     "lineClusteredColumnComboChart": ("Category", "Y"),  # Y2 handled specially
+    "lineStackedColumnComboChart": ("Category", "Y"),
+    "hundredPercentStackedColumnChart": ("Category", "Y"),
+    "areaChart": ("Category", "Y"),
+    "decompositionTreeVisual": ("Category", "Values"),
+    "heatmap": ("Category", "Size"),
 }
 DEFAULT_ROLES = ("Category", "Y")
 
@@ -733,18 +739,27 @@ def build_visual(
             }
         }]
 
-    document = {
-        "$schema": pbir_schemas.VISUAL_CONTAINER,
-        "name": name,
-        "position": {**position, "z": z_index, "tabOrder": z_index},
-        "visual": {
-            "visualType": visual_type,
-            "query": {"queryState": _query_state(projections)},
-            "objects": objects,
-            "drillFilterOtherVisuals": True,
-        },
-        "filterConfig": build_filter_config(visual, column_home, measure_home, field_resolver=field_resolver),
-    }
+    document = get_visual_template(visual_type)
+    document["$schema"] = pbir_schemas.VISUAL_CONTAINER
+    document["name"] = name
+    document["position"] = {**position, "z": z_index, "tabOrder": z_index}
+    
+    # Initialize or preserve visual container structure
+    if "visual" not in document:
+        document["visual"] = {}
+    document["visual"]["visualType"] = visual_type
+    document["visual"]["query"] = {"queryState": _query_state(projections)}
+    
+    # Merge template objects with dynamic objects
+    template_objects = document["visual"].get("objects", {})
+    merged_objects = dict(template_objects)
+    merged_objects.update(objects)
+    document["visual"]["objects"] = merged_objects
+    document["visual"]["drillFilterOtherVisuals"] = True
+
+    document["filterConfig"] = build_filter_config(
+        visual, column_home, measure_home, field_resolver=field_resolver
+    )
 
     applied = count_applied(document["filterConfig"])
 

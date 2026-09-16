@@ -206,19 +206,20 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
     if report_filters:
         report_doc["filterConfig"] = {"filters": report_filters}
 
+    from app.templates.loader import get_base_theme_json, get_static_template, get_page_template
+
     files: Dict[str, str] = {
         "definition/report.json": json.dumps(report_doc, indent=2),
         # Desktop refuses a PBIR report with no version marker.
         "definition/version.json": json.dumps(
             {"$schema": S.VERSION_METADATA, "version": S.REPORT_VERSION}, indent=2
         ),
-        f"StaticResources/SharedResources/{S.BASE_THEME_PATH}": build_theme_json(mapping),
+        # Bundle both standard Power BI base theme (CY24SU10) and custom converted QlikAppTheme
+        f"StaticResources/SharedResources/{S.BASE_THEME_PATH}": get_base_theme_json(),
+        f"StaticResources/SharedResources/{S.QLIK_THEME_PATH}": build_theme_json(mapping),
         "definition.pbir": _pbir(model_path),
         ".platform": _platform(app_name),
-        ".pbi/localSettings.json": json.dumps(
-            {"$schema": S.REPORT_LOCAL_SETTINGS},
-            indent=2,
-        ),
+        ".pbi/localSettings.json": get_static_template("report_localSettings.json"),
     }
 
     notes: List[Dict[str, Any]] = []
@@ -291,14 +292,14 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
             or text(sheet_style.get("backgroundColor") or sheet_style.get("background_color"))
             or text(as_dict(mapping.get("app_layout", {}).get("theme", {})).get("background_color"))
         )
-        page_doc: Dict[str, Any] = {
-            "$schema": S.PAGE,
+        page_doc = get_page_template()
+        page_doc.update({
             "name": page_id,
             "displayName": sheet_name,
             "displayOption": display_option,
             "height": page_height,
             "width": config.CANVAS_WIDTH,
-        }
+        })
         if page_bg and page_bg.startswith("#"):
             page_doc["objects"] = {
                 "background": [{

@@ -1,0 +1,17 @@
+{
+  "version": "1.0.0",
+  "diagrams": [
+    {
+      "name": "All tables",
+      "zoomValue": 100,
+      "isDefault": true,
+      "tables": [],
+      "layout": {
+        "boundingBoxWidth": 0,
+        "boundingBoxHeight": 0,
+        "boundingBoxPosition": {"x": 0, "y": 0},
+        "nodes": []
+      }
+    }
+  ]
+}

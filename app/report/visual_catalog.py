@@ -72,6 +72,18 @@ NATIVE = {
     "variable-input": "slicer",
     "variableinput": "slicer",
     "variable": "slicer",
+    "areachart": "areaChart",
+    "area-chart": "areaChart",
+    "sn-area-chart": "areaChart",
+    "heatmap": "heatmap",
+    "heat-map": "heatmap",
+    "sn-heatmap": "heatmap",
+    "multi-row-card": "multiRowCard",
+    "multirowcard": "multiRowCard",
+    "decomposition-tree": "decompositionTreeVisual",
+    "decompositiontree": "decompositionTreeVisual",
+    "filledmap": "filledMap",
+    "filled-map": "filledMap",
 }
 
 # No native equivalent: (fallback visual, why, what to do).
