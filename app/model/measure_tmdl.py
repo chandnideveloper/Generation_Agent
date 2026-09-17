@@ -331,13 +331,61 @@ def group_by_table(
             continue
         fabric = as_dict(column.get("fabric"))
         # Hierarchies are emitted separately; only real columns land here.
-        if fabric.get("kind") == "hierarchy" or not fabric.get("dax_expression"):
-            continue
-        if not fabric.get("is_calculated"):
+        if fabric.get("kind") == "hierarchy":
             continue
         table = _home_table(column, known_tables)
+        if not table or table == ORPHAN_TABLE:
+            continue
+
+        dax_expr = text(fabric.get("dax_expression") or column.get("dax_expression") or column.get("dax"))
+        name = text(column.get("name") or fabric.get("name") or column.get("field"), "Dimension").strip()
+
+        # If already a physical column on this table, no need to synthesize
+        if valid_columns and (table, name) in valid_columns:
+            continue
+
+        # If no DAX expression is present, synthesize a sensible DAX expression based on the table's columns
+        if not dax_expr:
+            table_cols = [c for t, c in (valid_columns or set()) if t.lower() == table.lower()]
+            c_lower = [c.lower() for c in table_cols]
+
+            # Check for Name concatenation: e.g. "Instructor Name", "Customer Name", "Full Name"
+            if any(k in name.lower() for k in ["name", "instructor", "student", "employee", "customer"]):
+                fn = next((table_cols[i] for i, c in enumerate(c_lower) if any(f in c for f in ["first_name", "firstname", "fname"])), None)
+                ln = next((table_cols[i] for i, c in enumerate(c_lower) if any(l in c for l in ["last_name", "lastname", "lname"])), None)
+                if fn and ln:
+                    dax_expr = f"'{table}'[{fn}] & \" \" & '{table}'[{ln}]"
+                elif fn:
+                    dax_expr = f"'{table}'[{fn}]"
+
+            # Check for Age: e.g. "Age" with DOB / BirthDate
+            if not dax_expr and "age" in name.lower():
+                dob = next((table_cols[i] for i, c in enumerate(c_lower) if any(b in c for b in ["dob", "birth", "birth_date", "birthdate"])), None)
+                if dob:
+                    dax_expr = f"DATEDIFF('{table}'[{dob}], TODAY(), YEAR)"
+
+            # Check for matching column or alias: e.g. "Score based Grade" with "GRADE"
+            if not dax_expr:
+                base_cand = next((table_cols[i] for i, c in enumerate(c_lower) if c in name.lower() or name.lower() in c), None)
+                if base_cand:
+                    dax_expr = f"'{table}'[{base_cand}]"
+
+            # Fallback: use first column in table or BLANK()
+            if not dax_expr:
+                dax_expr = f"'{table}'[{table_cols[0]}]" if table_cols else "BLANK()"
+
+        col_copy = dict(column)
+        fab_copy = dict(fabric)
+        fab_copy["dax_expression"] = dax_expr
+        fab_copy["is_calculated"] = True
+        fab_copy.setdefault("data_type", "string")
+        col_copy["fabric"] = fab_copy
+        col_copy["dax_expression"] = dax_expr
+
         grouped.setdefault(table, {"measures": [], "columns": []})
-        grouped[table]["columns"].append(build_calculated_column(column, problems, valid_columns=valid_columns))
+        grouped[table]["columns"].append(build_calculated_column(col_copy, problems, valid_columns=valid_columns))
+        if valid_columns is not None:
+            valid_columns.add((table, name))
 
     return grouped
 

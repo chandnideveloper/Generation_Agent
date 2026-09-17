@@ -605,13 +605,36 @@ def _mquery(
     port = text(conn.get("port"))
     database = text(conn.get("database") or conn.get("db"))
     schema = text(conn.get("schema") or table.get("schema"))
+    warehouse = text(conn.get("warehouse") or conn.get("wh") or os.getenv("SNOWFLAKE_WAREHOUSE") or os.getenv("DEFAULT_WAREHOUSE"))
+
+    if not server:
+        server = (
+            os.getenv("SNOWFLAKE_SERVER")
+            or os.getenv("DATABASE_SERVER")
+            or os.getenv("SQL_SERVER")
+            or os.getenv("DEFAULT_DB_SERVER")
+            or ""
+        )
+
+    if (warehouse or "snowflake" in str(conn).lower()) and driver in ("generic", "database", ""):
+        driver = "snowflake"
+
     extracted_table = None
     if qlik_query:
-        match_from = re.search(r"\bfrom\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", qlik_query, re.IGNORECASE)
-        if match_from:
+        # Check for 3-part: "DB"."SCHEMA"."TABLE" or DB.SCHEMA.TABLE
+        match_3 = re.search(r'FROM\s+["`]?([A-Za-z0-9_]+)["`]?\.["`]?([A-Za-z0-9_]+)["`]?\.["`]?([A-Za-z0-9_]+)["`]?', qlik_query, re.IGNORECASE)
+        if match_3:
+            if not database:
+                database = match_3.group(1)
             if not schema:
-                schema = match_from.group(1)
-            extracted_table = match_from.group(2)
+                schema = match_3.group(2)
+            extracted_table = match_3.group(3)
+        else:
+            match_from = re.search(r'\bfrom\s+["`]?([A-Za-z0-9_]+)["`]?\.["`]?([A-Za-z0-9_]+)["`]?', qlik_query, re.IGNORECASE)
+            if match_from:
+                if not schema:
+                    schema = match_from.group(1)
+                extracted_table = match_from.group(2)
 
     raw_source = extracted_table or text(table.get("source") or table.get("table_name") or name)
     clean_source = _clean_table_name(raw_source)
@@ -642,7 +665,8 @@ def _mquery(
                 return generator_fn(project, database or "", schema or "", query_str)
             endpoint = f"{server}:{port}" if port and port not in server else server
             if endpoint:
-                return generator_fn(endpoint, database or "", schema or "", query_str)
+                target_db = warehouse if token == "snowflake" and warehouse else (database or "")
+                return generator_fn(endpoint, target_db, schema or "", query_str)
 
     # Dialect-based fallback if driver was omitted but custom_sql is present
     if custom_sql:

@@ -111,6 +111,11 @@ def _entity_maps(mapping: Dict[str, Any]):
                 field_resolver[name.lower()] = (dim_table, matched[0])
                 if name not in column_home:
                     column_home[name] = dim_table
+            else:
+                # Even if not matching an existing physical column, register this dimension under its host table
+                field_resolver[name.lower()] = (dim_table, name)
+                if name not in column_home:
+                    column_home[name] = dim_table
 
     # 3. Map all master measures explicitly
     for measure in P.measures(mapping):
@@ -165,10 +170,12 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
     measure_home, column_home, field_resolver = _entity_maps(mapping)
     _auto_register_expression_labels(mapping, measure_home, column_home)
 
-    # Process report-level and page-level filters from mapping
+    # Process report-level and page-level filters from mapping with strict de-duplication
     raw_filters = as_list(mapping.get("filters")) or as_list(mapping.get("filter_panes"))
     report_filters: List[Dict[str, Any]] = []
     page_filters_by_sheet: Dict[str, List[Dict[str, Any]]] = {}
+    seen_report_filters: Set[Tuple[str, str]] = set()
+    seen_page_filters: Dict[str, Set[Tuple[str, str]]] = {}
 
     for f in raw_filters:
         f_dict = as_dict(f)
@@ -183,12 +190,17 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
                 target_t, target_c = field_resolver[fld.lower()]
 
         if target_t and target_c:
+            filter_key = (target_t.strip().lower(), target_c.strip().lower())
             fname = lineage_tag(f"filt:{target_t}:{target_c}")[:20]
             built_f = _field_filter(fname, target_t, target_c)
             if f_sheet and fabric_f.get("filter_scope") == "page":
-                page_filters_by_sheet.setdefault(f_sheet, []).append(built_f)
+                if filter_key not in seen_page_filters.setdefault(f_sheet, set()):
+                    seen_page_filters[f_sheet].add(filter_key)
+                    page_filters_by_sheet.setdefault(f_sheet, []).append(built_f)
             else:
-                report_filters.append(built_f)
+                if filter_key not in seen_report_filters:
+                    seen_report_filters.add(filter_key)
+                    report_filters.append(built_f)
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for visual in visuals:

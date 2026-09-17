@@ -271,6 +271,23 @@ def build_visual(
             is_meas = bool(entry.get("is_measure"))
             agg = text(entry.get("aggregation") or "None")
 
+            # Validate whether (ent, prop) is consistent with the model
+            lookup_key = (prop or field_name).strip().lower()
+            if lookup_key in field_resolver:
+                resolved_ent, resolved_prop = field_resolver[lookup_key]
+                if ent != resolved_ent:
+                    ent = resolved_ent
+                    prop = resolved_prop
+            elif prop in measure_home:
+                resolved_ent = measure_home[prop]
+                if ent != resolved_ent:
+                    ent = resolved_ent
+                is_meas = True
+            elif prop in column_home:
+                resolved_ent = column_home[prop]
+                if ent != resolved_ent:
+                    ent = resolved_ent
+
             if not (ent and prop) and field_name:
                 match = _match_field(field_name, measure_home, column_home, field_resolver)
                 if match:
