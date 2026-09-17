@@ -46,6 +46,8 @@ def _is_key_column(col_name: str) -> bool:
         return True
     if name.endswith("_code") or name.endswith("_no"):
         return True
+    if name.endswith("_date") or name.endswith("date"):
+        return True
     return False
 
 
@@ -114,6 +116,12 @@ def _is_primary_key_for_table(
         f"{sing}_date", f"{sing}date",
     }
     if c in candidate_keys:
+        return True
+
+    # Calendar / Date dimension table primary key match
+    if t in ("calendar", "date", "dim_date", "dates", "dimdate") and (
+        c.endswith("date") or c in ("date", "datekey", "date_key")
+    ):
         return True
 
     # If col_name contains the singular entity name with a key suffix (e.g. DateKey, CalendarDate, CustomerCode)

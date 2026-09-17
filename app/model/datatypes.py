@@ -53,7 +53,7 @@ def infer_type_from_name(col_name: str) -> Optional[str]:
         return "string"
     if any(clean.endswith(sw) or clean == sw for sw in ["result", "status", "type", "name", "category", "desc", "description", "side", "symbol", "trader", "reduction", "comment", "note", "title", "flag", "code"]):
         return "string"
-    if clean in INTEGER_KEYWORDS or clean.endswith("year") or clean.endswith("count"):
+    if clean in INTEGER_KEYWORDS or clean.endswith("year") or clean.endswith("count") or any(clean.endswith(sw) for sw in ["events", "trips", "transactions", "incidents"]):
         return "int64"
     if clean in NUMERIC_KEYWORDS or any(
         kw in clean for kw in (
@@ -77,7 +77,7 @@ def to_tmdl_type(raw: Any, col_name: str = "") -> str:
     if col_name:
         inferred = infer_type_from_name(col_name)
         if inferred:
-            if value.lower() in ("string", "text", ""):
+            if value.lower() in ("string", "text", "time", ""):
                 return inferred
             if inferred == "string" and any(k in col_name.lower() for k in ("band", "tier", "bucket", "bracket", "status", "type", "name", "category", "desc", "label")):
                 return "string"

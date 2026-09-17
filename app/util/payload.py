@@ -52,6 +52,16 @@ def unwrap_mapping(document: Any) -> Dict[str, Any]:
                         col_dict["qlik_column_name"] = col_dict["qlik_column"]
                     if "target_data_type" in col_dict and "fabric_datatype" not in col_dict:
                         col_dict["fabric_datatype"] = col_dict["target_data_type"]
+                    col_name = str(
+                        col_dict.get("fabric_column_name")
+                        or col_dict.get("fabric_column")
+                        or col_dict.get("qlik_column_name")
+                        or col_dict.get("qlik_column")
+                        or col_dict.get("name")
+                        or ""
+                    ).strip()
+                    if col_name and not col_dict.get("name"):
+                        col_dict["name"] = col_name
                     cols_by_table.setdefault(tbl, []).append(col_dict)
 
     tbls = res.get("tables")

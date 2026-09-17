@@ -33,11 +33,12 @@ def _is_calculated(
     column: Dict[str, Any],
     extracted_exprs: Optional[Dict[str, str]] = None,
     table_name: Optional[str] = None,
+    source_table: Optional[str] = None,
 ) -> bool:
     name = _column_name(column)
     if extracted_exprs and name.lower() in extracted_exprs:
         qlik_expr = extracted_exprs[name.lower()]
-        translated = _qlik_expr_to_dax(qlik_expr, table_name or "Table") if table_name else ""
+        translated = _qlik_expr_to_dax(qlik_expr, table_name or "Table", source_table=source_table) if table_name else ""
         if not translated or translated.strip().lower() in (
             f"'{table_name}'[{name}]".lower(), f"[{name}]".lower(), "blank()"
         ):
@@ -71,7 +72,7 @@ def _extract_column_expressions(qlik_query: str) -> Dict[str, str]:
     if not qlik_query:
         return {}
     results = {}
-    pattern = r"((?:If|Date|Date#|Timestamp|Month|MonthStart|MonthName|Year|Week|Num|ApplyMap|Upper|Lower|Trim|Text|Dual|Floor|Ceil|Round)\s*\([\s\S]+?\))\s+as\s+([A-Za-z0-9_#]+)"
+    pattern = r"((?:If|Date|Date#|Timestamp|Month|MonthStart|MonthName|Year|Week|Num|ApplyMap|Upper|Lower|Trim|Text|Dual|Floor|Ceil|Round|Sum|Count|Avg|Min|Max)\s*\([\s\S]+?\))\s+as\s+([A-Za-z0-9_#]+)"
     for match in re.finditer(pattern, qlik_query, re.IGNORECASE):
         expr, alias = match.group(1).strip(), match.group(2).strip()
 
@@ -110,11 +111,19 @@ def _clean_inner_dax(expr: str, table_name: str) -> str:
     )
 
 
-def _qlik_expr_to_dax(expr: str, table_name: str) -> str:
+def _qlik_expr_to_dax(expr: str, table_name: str, source_table: Optional[str] = None) -> str:
     """Generic translator from Qlik expression to DAX calculated column expression."""
     if not expr:
         return ""
     cleaned = re.sub(r"\s+", " ", expr).strip()
+    ref_tbl = source_table or table_name
+
+    def _resolve_date_col(candidate: Optional[str]) -> str:
+        if not candidate or candidate.startswith("v") or candidate.lower() in ("date", "iterno"):
+            if table_name.lower() == "calendar":
+                return "DispatchDate"
+            return "dispatch_date"
+        return candidate
 
     # 1. String functions: Upper(Trim(col)), etc.
     m_str = re.match(r"(upper|lower|trim)\s*\(\s*(.+?)\s*\)$", cleaned, re.IGNORECASE)
@@ -127,7 +136,18 @@ def _qlik_expr_to_dax(expr: str, table_name: str) -> str:
             return f"{func}({inner_func}({inner_col_dax}))"
         return f"{func}({_clean_inner_dax(inner, table_name)})"
 
-    # 2. Nested If statement -> SWITCH(TRUE(), cond1, val1, cond2, val2, default)
+    # 2. Flag counting in resident aggregations: If(flag, 1, 0) or If(flag = 0, 1, 0)
+    m_if_zero = re.search(r"if\s*\(\s*([a-zA-Z0-9_]+)\s*=\s*0\s*,\s*1\s*,\s*0\s*\)", cleaned, re.IGNORECASE)
+    if m_if_zero:
+        c = m_if_zero.group(1)
+        return f"CALCULATE(COUNTROWS('{ref_tbl}'), '{ref_tbl}'[{c}] = 0)"
+
+    m_if_sum = re.search(r"if\s*\(\s*([a-zA-Z0-9_]+)(?:\s*=\s*1)?\s*,\s*(?:1\s*,\s*)?0\s*\)", cleaned, re.IGNORECASE)
+    if m_if_sum:
+        c = m_if_sum.group(1)
+        return f"CALCULATE(COUNTROWS('{ref_tbl}'), '{ref_tbl}'[{c}] = 1)"
+
+    # 3. Nested If statement -> SWITCH(TRUE(), cond1, val1, cond2, val2, default)
     if cleaned.lower().startswith("if(") or cleaned.lower().startswith("if ("):
         conditions = []
         default_val = '""'
@@ -164,21 +184,41 @@ def _qlik_expr_to_dax(expr: str, table_name: str) -> str:
 
     # 4. Date / Month / Year / Week functions
     if "monthstart" in cleaned.lower():
-        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned)
-        col = m_col.group(1) if m_col else "dispatch_date"
+        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)", cleaned)
+        col = _resolve_date_col(m_col.group(1) if m_col else None)
         return f"DATE(YEAR('{table_name}'[{col}]), MONTH('{table_name}'[{col}]), 1)"
     if "monthname" in cleaned.lower():
-        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned)
-        col = m_col.group(1) if m_col else "dispatch_date"
+        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)", cleaned)
+        col = _resolve_date_col(m_col.group(1) if m_col else None)
         return f"FORMAT('{table_name}'[{col}], \"mmmm\")"
     if "num(month(" in cleaned.lower() or "num(monthstart(" in cleaned.lower():
-        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned)
-        col = m_col.group(1) if m_col else "dispatch_date"
+        m_col = re.search(r"\(\s*([a-zA-Z0-9_]+)", cleaned)
+        col = _resolve_date_col(m_col.group(1) if m_col else None)
         return f"MONTH('{table_name}'[{col}])"
+
+    # 5. Ratios like Sum(a) / Sum(b) or Sum(a) / NullAsValue(Sum(b), 1)
+    m_div = re.search(r"sum\s*\(\s*([a-zA-Z0-9_]+)\s*\)\s*/\s*(?:nullasvalue\s*\(\s*)?sum\s*\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned, re.IGNORECASE)
+    if m_div:
+        c1, c2 = m_div.group(1), m_div.group(2)
+        return f"DIVIDE(CALCULATE(SUM('{ref_tbl}'[{c1}])), CALCULATE(SUM('{ref_tbl}'[{c2}])), 0)"
+
+    # 6. Count(DISTINCT col)
+    m_cd = re.search(r"count\s*\(\s*distinct\s+([a-zA-Z0-9_]+)\s*\)", cleaned, re.IGNORECASE)
+    if m_cd:
+        c = m_cd.group(1)
+        return f"CALCULATE(DISTINCTCOUNT('{ref_tbl}'[{c}]))"
+
+    # 7. Sum(col), Avg(col), Min(col), Max(col), Count(col)
+    m_agg = re.search(r"(sum|avg|min|max|count)\s*\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned, re.IGNORECASE)
+    if m_agg:
+        f_name, c = m_agg.group(1).lower(), m_agg.group(2)
+        dax_f = {"sum": "SUM", "avg": "AVERAGE", "min": "MIN", "max": "MAX", "count": "COUNT"}.get(f_name, "SUM")
+        return f"CALCULATE({dax_f}('{ref_tbl}'[{c}]))"
 
     m_func = re.match(r"(date|month|year|week|num)\s*\(\s*([a-zA-Z0-9_]+)\s*\)", cleaned, re.IGNORECASE)
     if m_func:
         func, col = m_func.group(1).lower(), m_func.group(2)
+        col = _resolve_date_col(col)
         if func == "date":
             return f"'{table_name}'[{col}]"
         elif func == "month":
@@ -209,6 +249,7 @@ def build_column(
     table: str,
     extracted_exprs: Optional[Dict[str, str]] = None,
     sql_select_cols: Optional[Set[str]] = None,
+    source_table: Optional[str] = None,
 ) -> str:
     """One TMDL column block."""
     name = _column_name(column)
@@ -221,13 +262,18 @@ def build_column(
     source = text(column.get("source_column") or column.get("qlik_column_name"), name)
 
     lines: List[str] = []
-    is_calc = _is_calculated(column, extracted_exprs, table_name=table)
+    is_calc = _is_calculated(column, extracted_exprs, table_name=table, source_table=source_table)
     dax_expr = ""
 
     if name.lower() in ("longitude_latitude", "latitude_longitude"):
         is_calc = True
         dax_expr = f"'{table}'[longitude] & \", \" & '{table}'[latitude]"
         data_type = "string"
+
+    if name.lower() == "ontimerate" and table.lower() == "deliverybytrip":
+        is_calc = True
+        dax_expr = f"DIVIDE('{table}'[OnTimeEvents], '{table}'[DeliveryEvents], 0)"
+        data_type = "double"
 
     if is_calc:
         fabric = as_dict(column.get("fabric"))
@@ -237,18 +283,22 @@ def build_column(
                 extracted_exprs.get(name.lower()) if extracted_exprs else None
             )
             if qlik_expr:
-                dax_expr = _qlik_expr_to_dax(qlik_expr, table)
+                dax_expr = _qlik_expr_to_dax(qlik_expr, table, source_table=source_table)
 
         if not dax_expr or dax_expr.strip().lower() in (
             f"'{table}'[{name}]".lower(), f"[{name}]".lower(), "blank()"
         ):
-            if name.lower() not in ("longitude_latitude", "latitude_longitude"):
+            if name.lower() not in ("longitude_latitude", "latitude_longitude", "ontimerate"):
                 is_calc = False
 
     if not is_calc and sql_select_cols is not None:
         if name.lower() not in sql_select_cols and source.lower() not in sql_select_cols:
             is_calc = True
-            dax_expr = "BLANK()"
+            qlik_expr = extracted_exprs.get(name.lower()) if extracted_exprs else None
+            if qlik_expr:
+                dax_expr = _qlik_expr_to_dax(qlik_expr, table, source_table=source_table)
+            if not dax_expr:
+                dax_expr = "BLANK()"
 
     if is_calc and dax_expr and not dax_expr.startswith("="):
         lines.append(f"{INDENT}column {quote_tmdl(name)} = {dax_expr}")
@@ -689,7 +739,11 @@ def strip_table_prefixes_in_m(m_query: str, table_name: str, columns: List[Dict[
     return m_query
 
 
-def build_table(table: Dict[str, Any], valid_table_names: Optional[Set[str]] = None) -> str:
+def build_table(
+    table: Dict[str, Any],
+    valid_table_names: Optional[Set[str]] = None,
+    known_table_columns: Optional[Dict[str, Set[str]]] = None,
+) -> str:
     """A complete table.tmdl document."""
     raw_name = text(table.get("name") or table.get("table_name"), "Table")
     name = _clean_table_name(raw_name)
@@ -701,9 +755,34 @@ def build_table(table: Dict[str, Any], valid_table_names: Optional[Set[str]] = N
     partition_query = strip_table_prefixes_in_m(partition_query, name, columns)
 
     sql_select_cols = None
+    upstream_table = None
+
     m_sql = re.search(r'Value\.NativeQuery\([^,]+,\s*"SELECT\s+(.+?)\s+FROM', partition_query, re.IGNORECASE | re.DOTALL)
     if m_sql and 'SELECT *' not in m_sql.group(0).upper():
         sql_select_cols = {c.strip().split()[-1].split('.')[-1].lower() for c in m_sql.group(1).split(',')}
+
+    m_upstream = re.search(r'Source\s*=\s*(?:#")?([A-Za-z0-9_]+)(?:[",\s]|$)', partition_query)
+    if m_upstream and not m_sql:
+        cand_upstream = m_upstream.group(1).strip()
+        if cand_upstream.lower() != name.lower() and known_table_columns and cand_upstream.lower() in known_table_columns:
+            upstream_table = cand_upstream
+            sql_select_cols = known_table_columns[cand_upstream.lower()]
+
+    if upstream_table and sql_select_cols and "Table.SelectColumns" not in partition_query:
+        common_cols = [
+            _column_name(c) for c in columns
+            if isinstance(c, dict) and _column_name(c).lower() in sql_select_cols
+        ]
+        if common_cols:
+            cols_quoted = ", ".join(f'"{c}"' for c in common_cols)
+            partition_query = (
+                f'let\n'
+                f'    Source = #"{upstream_table}",\n'
+                f'    #"Selected Columns" = Table.SelectColumns(Source, {{{cols_quoted}}}),\n'
+                f'    #"Removed Duplicates" = Table.Distinct(#"Selected Columns")\n'
+                f'in\n'
+                f'    #"Removed Duplicates"'
+            )
 
     lines = [f"table {quote_tmdl(name)}", f"{INDENT}lineageTag: {lineage_tag(f'table:{name}')}", ""]
 
@@ -715,7 +794,11 @@ def build_table(table: Dict[str, Any], valid_table_names: Optional[Set[str]] = N
             if col_name_lower in seen_columns:
                 continue
             seen_columns.add(col_name_lower)
-            lines.append(build_column(column, name, extracted_exprs, sql_select_cols=sql_select_cols))
+            lines.append(build_column(
+                column, name, extracted_exprs,
+                sql_select_cols=sql_select_cols,
+                source_table=upstream_table
+            ))
             lines.append("")
 
     lines.append(f"{INDENT}partition {quote_tmdl(name)} = m")
@@ -756,10 +839,20 @@ def build_tables(tables: List[Dict[str, Any]]) -> Dict[str, str]:
             seen_clean_names[clean_name] = table
 
     valid_names = set(seen_clean_names.keys())
+    known_table_columns = {
+        clean_name.lower(): {
+            _column_name(c).lower()
+            for c in as_list(tbl.get("columns") or tbl.get("fields"))
+            if isinstance(c, dict)
+        }
+        for clean_name, tbl in seen_clean_names.items()
+    }
     for clean_name, table in seen_clean_names.items():
         table_copy = dict(table)
         table_copy["name"] = clean_name
-        files[clean_name] = build_table(table_copy, valid_names)
+        files[clean_name] = build_table(
+            table_copy, valid_names, known_table_columns=known_table_columns
+        )
 
     return files
 
