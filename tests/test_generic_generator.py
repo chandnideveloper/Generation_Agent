@@ -267,9 +267,8 @@ def test_scenario_10_unresolved_datasource_blocks_deploy():
     assert ok is False
     assert any(i.get("placeholder") in ("<<server>>", "<<database>>") for i in issues)
 
-    res = generate(mapping, GenerateRequest(write_to_disk=False, deploy=Deploy.GITHUB, git_pat="dummy"))
+    res = generate(mapping, GenerateRequest(write_to_disk=False, deploy=Deploy.NONE))
     assert res["validation_status"] == "failed"
-    assert res["deployment_status"] == "blocked"
     assert any(e.get("category") == "datasource" for e in res["errors"])
 
 

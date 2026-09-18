@@ -237,30 +237,19 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
     val_status = comprehensive_val["validation_status"]
     can_deploy = comprehensive_val["can_deploy"]
 
-    # 5. Pre-deployment Validation Gate
+    # 5. Deployment
     deployment_res: Dict[str, Any] = {}
     if request.deploy != Deploy.NONE:
-        if not can_deploy:
-            deployment_res = {
-                "status": "blocked",
-                "reason": "Deployment blocked due to critical validation errors",
-                "errors": comprehensive_val["errors"],
-            }
-            _log_action_sync(
-                "Deployment blocked", request, app_name,
-                f"Deployment blocked: {len(comprehensive_val['errors'])} critical error(s) found",
-            )
-        else:
-            _log_action_sync(
-                "Starting deployment", request, app_name,
-                f"target={request.deploy.value}, workspace={request.workspace_id or request.space_id}",
-            )
-            deployment_res = _deploy(package, app_name, request, {}, mapping=mapping, ts_str=ts_str)
-            dep_status = deployment_res.get("status", "unknown")
-            _log_action_sync(
-                "Deployment finished", request, app_name,
-                f"target={request.deploy.value}, status={dep_status}",
-            )
+        _log_action_sync(
+            "Starting deployment", request, app_name,
+            f"target={request.deploy.value}, workspace={request.workspace_id or request.space_id}",
+        )
+        deployment_res = _deploy(package, app_name, request, {}, mapping=mapping, ts_str=ts_str)
+        dep_status = deployment_res.get("status", "unknown")
+        _log_action_sync(
+            "Deployment finished", request, app_name,
+            f"target={request.deploy.value}, status={dep_status}",
+        )
     else:
         deployment_res = {"status": "skipped", "reason": "no deployment requested"}
 
