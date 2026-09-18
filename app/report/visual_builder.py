@@ -237,6 +237,7 @@ def build_visual(
         or source.get("x_axis")
         or fabric.get("x_axis_fields")
         or visual.get("x_axis")
+        or visual.get("dimensions")
     )
     dimensions = []
     for d in raw_dims:
@@ -252,6 +253,7 @@ def build_visual(
         or source.get("y_axis")
         or fabric.get("y_axis_fields")
         or visual.get("y_axis")
+        or visual.get("measures")
     )
 
     # Check if explicit field_roles were produced by the mapping agent / LLM

@@ -24,6 +24,7 @@ from app.model.semantic_model import build_semantic_model
 from app.model.table_tmdl import supabase_file_url
 from app.package import artifacts as artifact_builder
 from app.package import package_store, pbip_packager, validator
+from app.package.comprehensive_validator import run_comprehensive_validation
 from app.report.report_writer import build_report
 from app.schemas import Deploy, GenerateRequest, Target
 from app.util.ids import safe_filename, slug
@@ -204,17 +205,79 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
     else:
         _log_action_sync("Skipped disk write", request, app_name, "push_only/write_to_disk=False requested")
 
-    # 4. Structural validation of the emitted package
+    # 4. Structural and comprehensive validation of the emitted package
     validation = validator.validate(package, app_name)
+    comprehensive_val = run_comprehensive_validation(mapping, package, app_name, model_report, notes)
+
     _log_action_sync(
-        "Validated generated package structure", request, app_name,
-        f"ok={validation.get('ok')}, errors={len(validation.get('errors', []))}, "
-        f"warnings={len(validation.get('warnings', []))}",
+        "Validated generated package structure and semantics", request, app_name,
+        f"val_status={comprehensive_val['validation_status']}, can_deploy={comprehensive_val['can_deploy']}, "
+        f"errors={len(comprehensive_val['errors'])}, warnings={len(comprehensive_val['warnings'])}",
     )
+
+    # Calculate dynamic object counts for generation summary
+    num_tables = len([p for p in package if "/definition/tables/" in p and p.endswith(".tmdl") and not p.split("/")[-1].startswith("LocalDateTable_")])
+    num_measures = model_report.get("measures", 0)
+    num_calc_cols = model_report.get("calculated_columns", 0)
+    num_rels = model_report.get("relationships_written", 0)
+    num_pages = len([p for p in package if "/pages/" in p and p.endswith("page.json")])
+    num_visuals = len([p for p in package if "/visuals/" in p and p.endswith("visual.json")])
+    num_filters = comprehensive_val["summary"]["filters"]["total"]
+
+    gen_summary = {
+        "tables": num_tables,
+        "measures": num_measures,
+        "calculated_columns": num_calc_cols,
+        "relationships": num_rels,
+        "pages": num_pages,
+        "visuals": num_visuals,
+        "filters": num_filters,
+    }
+
+    val_status = comprehensive_val["validation_status"]
+    can_deploy = comprehensive_val["can_deploy"]
+
+    # 5. Pre-deployment Validation Gate
+    deployment_res: Dict[str, Any] = {}
+    if request.deploy != Deploy.NONE:
+        if not can_deploy:
+            deployment_res = {
+                "status": "blocked",
+                "reason": "Deployment blocked due to critical validation errors",
+                "errors": comprehensive_val["errors"],
+            }
+            _log_action_sync(
+                "Deployment blocked", request, app_name,
+                f"Deployment blocked: {len(comprehensive_val['errors'])} critical error(s) found",
+            )
+        else:
+            _log_action_sync(
+                "Starting deployment", request, app_name,
+                f"target={request.deploy.value}, workspace={request.workspace_id or request.space_id}",
+            )
+            deployment_res = _deploy(package, app_name, request, {}, mapping=mapping, ts_str=ts_str)
+            dep_status = deployment_res.get("status", "unknown")
+            _log_action_sync(
+                "Deployment finished", request, app_name,
+                f"target={request.deploy.value}, status={dep_status}",
+            )
+    else:
+        deployment_res = {"status": "skipped", "reason": "no deployment requested"}
+
+    deployment_status = deployment_res.get("status", "skipped")
 
     result: Dict[str, Any] = {
         "status": "success" if validation["ok"] else "warning",
-        "validation": validation,
+        "generation_status": "success",
+        "validation_status": val_status,
+        "deployment_status": deployment_status,
+        "generation": gen_summary,
+        "validation": {
+            "ok": validation.get("ok", True) and val_status in ("success", "warning"),
+            **comprehensive_val["summary"],
+            "errors": comprehensive_val["errors"],
+            "warnings": comprehensive_val["warnings"],
+        },
         "target": request.target.value,
         "deploy": request.deploy.value,
         "app_id": request.app_id or identity.get("app_id"),
@@ -225,7 +288,9 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         "total_bytes": artifact_builder.measure(package)["total_bytes"],
         "summary": {"semantic_model": model_report, "report": report_stats},
         "visual_notes": notes,
-        "deployment": {},
+        "deployment": deployment_res,
+        "errors": comprehensive_val["errors"],
+        "warnings": comprehensive_val["warnings"],
     }
 
     _log_action_sync("Created Fabric PBIP deployment package", request, app_name, f"Package created: {len(package)} files, {result['total_bytes']} bytes")
@@ -241,28 +306,13 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
             result["semantic_model"] = tree.get("semantic_model", {})
             result["report"] = tree.get("report", {})
 
-    if request.deploy != Deploy.NONE:
-        _log_action_sync(
-            "Starting deployment", request, app_name,
-            f"target={request.deploy.value}, workspace={request.workspace_id or request.space_id}",
-        )
-    result["deployment"] = _deploy(package, app_name, request, result, mapping=mapping, ts_str=ts_str)
-    if request.deploy != Deploy.NONE:
-        dep_status = result["deployment"].get("status", "unknown")
-        _log_action_sync(
-            "Deployment finished", request, app_name,
-            f"target={request.deploy.value}, status={dep_status}",
-        )
-
-    # Deployment outcome is reported in its own `deployment` block and in the
-    # message, not by overwriting the top-level `status` - the package was
-    # already built successfully (or not) independent of whether pushing it
-    # to a remote target then failed, and a deployment failure must not make
-    # an otherwise-successful, already-materialized package look lost.
-    if result["deployment"].get("status") == "error":
-        result["message"] = f"Package generated locally, but deployment to {request.deploy.value} failed: {result['deployment'].get('error')}"
-    elif result["deployment"].get("status") == "success":
-        dep = result["deployment"]
+    if deployment_status == "blocked":
+        err_reasons = "; ".join(e.get("reason", "Validation error") for e in comprehensive_val["errors"][:3])
+        result["message"] = f"Package generated locally; deployment blocked due to validation errors: {err_reasons}"
+    elif deployment_status == "error":
+        result["message"] = f"Package generated locally, but deployment to {request.deploy.value} failed: {deployment_res.get('error')}"
+    elif deployment_status == "success":
+        dep = deployment_res
         items_desc = ", ".join(f"{k}: {v}" for k, v in dep.get("items", {}).items())
         result["message"] = f"{_message(result)} | Successfully deployed to {request.deploy.value} ({items_desc})"
     else:

@@ -171,7 +171,7 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
     _auto_register_expression_labels(mapping, measure_home, column_home)
 
     # Process report-level and page-level filters from mapping with strict de-duplication
-    raw_filters = as_list(mapping.get("filters")) or as_list(mapping.get("filter_panes"))
+    raw_filters = as_list(mapping.get("filters")) or as_list(mapping.get("filter_panes")) or as_list(as_dict(mapping.get("app_layout")).get("filters"))
     report_filters: List[Dict[str, Any]] = []
     page_filters_by_sheet: Dict[str, List[Dict[str, Any]]] = {}
     seen_report_filters: Set[Tuple[str, str]] = set()
@@ -180,8 +180,8 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
     for f in raw_filters:
         f_dict = as_dict(f)
         fabric_f = as_dict(f_dict.get("fabric"))
-        target_t = fabric_f.get("target_table")
-        target_c = fabric_f.get("target_column")
+        target_t = fabric_f.get("target_table") or f_dict.get("table") or f_dict.get("target_table")
+        target_c = fabric_f.get("target_column") or f_dict.get("column") or f_dict.get("target_column")
         f_sheet = fabric_f.get("sheet_name") or f_dict.get("sheet_name")
 
         if not (target_t and target_c):
@@ -203,6 +203,10 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
                     report_filters.append(built_f)
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for s in P.sheets(mapping):
+        stitle = text(s.get("title") or s.get("name") or s.get("sheet_name"))
+        if stitle:
+            grouped.setdefault(stitle, [])
     for visual in visuals:
         grouped.setdefault(_sheet_key(visual), []).append(visual)
     if not grouped:

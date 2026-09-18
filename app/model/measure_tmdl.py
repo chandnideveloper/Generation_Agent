@@ -19,7 +19,7 @@ ORPHAN_TABLE = "_Measures"
 def _home_table(item: Dict[str, Any], known: List[str]) -> str:
     """Where the measure should live."""
     fabric = as_dict(item.get("fabric"))
-    candidates = [fabric.get("table"), *as_list(item.get("tables"))]
+    candidates = [fabric.get("table"), item.get("table"), *as_list(item.get("tables"))]
     for candidate in candidates:
         name = text(candidate)
         if name and name in known:
@@ -241,7 +241,7 @@ def build_measure(
     cleaned_raw = _clean_dax(raw)
     home_tbl = text(fabric.get("table") or (measure.get("tables") or [""])[0] or "_Measures")
     repaired_raw = _repair_dax_columns(cleaned_raw, home_tbl, valid_columns)
-    dax, problem = guard(name, repaired_raw)
+    dax, problem = guard(name, repaired_raw, home_table=home_tbl)
     lines: List[str] = []
     if problem:
         if problems is not None:
@@ -285,7 +285,7 @@ def build_calculated_column(
     cleaned_raw = _clean_dax(raw)
     home_tbl = text(fabric.get("table") or (column.get("tables") or [""])[0] or "_Measures")
     repaired_raw = _repair_dax_columns(cleaned_raw, home_tbl, valid_columns)
-    dax, problem = guard(name, repaired_raw)
+    dax, problem = guard(name, repaired_raw, home_table=home_tbl)
     lines: List[str] = []
     if problem:
         if problems is not None:
@@ -349,8 +349,8 @@ def group_by_table(
             table_cols = [c for t, c in (valid_columns or set()) if t.lower() == table.lower()]
             c_lower = [c.lower() for c in table_cols]
 
-            # Check for Name concatenation: e.g. "Instructor Name", "Customer Name", "Full Name"
-            if any(k in name.lower() for k in ["name", "instructor", "student", "employee", "customer"]):
+            # Check for Name concatenation: e.g. "Full Name", "Customer Name", etc.
+            if "name" in name.lower():
                 fn = next((table_cols[i] for i, c in enumerate(c_lower) if any(f in c for f in ["first_name", "firstname", "fname"])), None)
                 ln = next((table_cols[i] for i, c in enumerate(c_lower) if any(l in c for l in ["last_name", "lastname", "lname"])), None)
                 if fn and ln:

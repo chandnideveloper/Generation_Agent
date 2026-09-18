@@ -13,7 +13,7 @@ Produces the file map for `<name>.SemanticModel/`:
 
 import json
 import uuid
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import config
 from app.model import measure_tmdl
@@ -31,7 +31,8 @@ from app.util import payload as P
 INDENT = "\t"
 
 
-def _model_tmdl(app_name: str, table_names: List[str]) -> str:
+def _model_tmdl(app_name: str, table_names: List[str], ref_table_names: Optional[List[str]] = None) -> str:
+    ref_names = ref_table_names if ref_table_names is not None else table_names
     lines = [
         "model Model",
         f"{INDENT}culture: {config.TMDL_CULTURE}",
@@ -43,7 +44,7 @@ def _model_tmdl(app_name: str, table_names: List[str]) -> str:
         f'{INDENT}annotation PBI_ProTooling = ["DevMode"]',
         "",
     ]
-    for name in table_names:
+    for name in ref_names:
         lines.append(f"ref table {quote_tmdl(name)}")
     lines.append("")
     lines.append(f"ref cultureInfo {config.TMDL_CULTURE}")
@@ -136,12 +137,16 @@ def build_semantic_model(
 
     table_names = list(table_files)
 
+    # Auto-generate hidden LocalDateTable for every datetime column
+    local_date_tables = build_local_date_tables(tables)
+    all_ref_tables = table_names + list(local_date_tables.keys())
+
     relationships_tmdl, skipped = build_relationships(
         relationships, valid_columns, key_columns
     )
 
     files: Dict[str, str] = {
-        "definition/model.tmdl": _model_tmdl(app_name, table_names),
+        "definition/model.tmdl": _model_tmdl(app_name, table_names, ref_table_names=all_ref_tables),
         "definition/database.tmdl": _database_tmdl(),
         f"definition/cultures/{config.TMDL_CULTURE}.tmdl": _culture_tmdl(),
         "definition.pbism": get_static_template("definition.pbism.json"),
@@ -163,8 +168,6 @@ def build_semantic_model(
     for name, content in table_files.items():
         files[f"definition/tables/{safe_filename(name, 'Table')}.tmdl"] = content
 
-    # Auto-generate hidden LocalDateTable for every datetime column
-    local_date_tables = build_local_date_tables(tables)
     for ldt_name, ldt_content in local_date_tables.items():
         files[f"definition/tables/{safe_filename(ldt_name, 'Table')}.tmdl"] = ldt_content
 

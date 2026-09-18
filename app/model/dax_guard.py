@@ -64,6 +64,21 @@ QLIK_LEFTOVERS: List[Tuple[re.Pattern, str, str]] = [
         "Qlik set identifier has no direct DAX equivalent",
         "Convert set identifier into CALCULATE filter arguments.",
     ),
+    (
+        re.compile(r"\bMATCH\s*\(", re.IGNORECASE),
+        "Qlik Match() has no direct DAX equivalent",
+        "Use SWITCH(column, val1, res1, ...) or IN operator instead.",
+    ),
+    (
+        re.compile(r"\bPICK\s*\(", re.IGNORECASE),
+        "Qlik Pick() has no direct DAX equivalent",
+        "Use SWITCH(column, val1, res1, ...) instead.",
+    ),
+    (
+        re.compile(r"\bALT\s*\(", re.IGNORECASE),
+        "Qlik Alt() has no direct DAX equivalent",
+        "Use COALESCE(...) instead.",
+    ),
 ]
 
 # 'Table'['Other'[col]] — a nested reference the converter can produce.
@@ -100,14 +115,34 @@ def validate(dax: str) -> Optional[Dict[str, str]]:
     return None
 
 
-def guard(name: str, dax: str) -> Tuple[str, Optional[Dict[str, str]]]:
-    """Return (safe_expression, problem-or-None)."""
-    problem = validate(dax)
+def guard(name: str, dax: str, home_table: Optional[str] = None) -> Tuple[str, Optional[Dict[str, str]]]:
+    """Return (safe_expression, problem-or-None).
+    Safely translates convertible Qlik constructs (e.g. SWITCH(Match(...)), Pick(Match(...)))
+    before validating. If still containing invalid Qlik syntax or unbalanced DAX,
+    replaces with safe BLANK() placeholder and reports the problem.
+    """
+    from app.model.qlik_dax_converter import transform_qlik_expression
+
+    orig_dax = (dax or "").strip()
+    transformed_dax, status, reason = transform_qlik_expression(orig_dax, home_table=home_table)
+
+    if status == "rewrite_required":
+        return PLACEHOLDER, {
+            "name": name,
+            "original": orig_dax,
+            "reason": reason or "Qlik construct requires rewrite",
+            "suggestion": "Convert the Qlik expression to DAX manually.",
+            "status": "rewrite_required",
+        }
+
+    problem = validate(transformed_dax)
     if not problem:
-        return dax, None
+        return transformed_dax, None
+
     return PLACEHOLDER, {
         "name": name,
-        "original": (dax or "").strip(),
+        "original": orig_dax,
         "reason": problem["reason"],
         "suggestion": problem["suggestion"],
+        "status": "rewrite_required",
     }

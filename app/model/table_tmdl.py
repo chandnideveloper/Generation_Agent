@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 from app.model.datatypes import format_string, summarize_by, to_tmdl_type
+from app.model.datatype_resolver import reconcile_table_datatypes
 from app.util.ids import lineage_tag, quote_tmdl
 from app.util.payload import as_dict, as_list, text
 
@@ -250,10 +251,11 @@ def build_column(
     extracted_exprs: Optional[Dict[str, str]] = None,
     sql_select_cols: Optional[Set[str]] = None,
     source_table: Optional[str] = None,
+    resolved_data_type: Optional[str] = None,
 ) -> str:
     """One TMDL column block."""
     name = _column_name(column)
-    data_type = to_tmdl_type(
+    data_type = resolved_data_type or to_tmdl_type(
         column.get("fabric_datatype") or column.get("data_type")
         or column.get("qlik_datatype") or column.get("dataType") or column.get("type"),
         col_name=name,
@@ -264,16 +266,6 @@ def build_column(
     lines: List[str] = []
     is_calc = _is_calculated(column, extracted_exprs, table_name=table, source_table=source_table)
     dax_expr = ""
-
-    if name.lower() in ("longitude_latitude", "latitude_longitude"):
-        is_calc = True
-        dax_expr = f"'{table}'[longitude] & \", \" & '{table}'[latitude]"
-        data_type = "string"
-
-    if name.lower() == "ontimerate" and table.lower() == "deliverybytrip":
-        is_calc = True
-        dax_expr = f"DIVIDE('{table}'[OnTimeEvents], '{table}'[DeliveryEvents], 0)"
-        data_type = "double"
 
     if is_calc:
         fabric = as_dict(column.get("fabric"))
@@ -288,8 +280,7 @@ def build_column(
         if not dax_expr or dax_expr.strip().lower() in (
             f"'{table}'[{name}]".lower(), f"[{name}]".lower(), "blank()"
         ):
-            if name.lower() not in ("longitude_latitude", "latitude_longitude", "ontimerate"):
-                is_calc = False
+            is_calc = False
 
     if not is_calc and sql_select_cols is not None:
         if name.lower() not in sql_select_cols and source.lower() not in sql_select_cols:
@@ -808,6 +799,8 @@ def build_table(
                 f'    #"Removed Duplicates"'
             )
 
+    resolved_types, _ = reconcile_table_datatypes(columns, partition_query)
+
     lines = [f"table {quote_tmdl(name)}", f"{INDENT}lineageTag: {lineage_tag(f'table:{name}')}", ""]
 
     seen_columns = set()
@@ -818,10 +811,12 @@ def build_table(
             if col_name_lower in seen_columns:
                 continue
             seen_columns.add(col_name_lower)
+            col_resolved_type = resolved_types.get(col_name_lower)
             lines.append(build_column(
                 column, name, extracted_exprs,
                 sql_select_cols=sql_select_cols,
-                source_table=upstream_table
+                source_table=upstream_table,
+                resolved_data_type=col_resolved_type,
             ))
             lines.append("")
 

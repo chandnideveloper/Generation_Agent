@@ -142,6 +142,17 @@ def relationships(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [r for r in as_list(mapping.get("relationships")) if isinstance(r, dict)]
 
 
+def sheets(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    block = mapping.get("visuals")
+    if isinstance(block, dict) and block.get("sheets"):
+        return [s for s in as_list(block["sheets"]) if isinstance(s, dict)]
+    sh = mapping.get("sheets")
+    if sh:
+        return [s for s in as_list(sh) if isinstance(s, dict)]
+    app_layout = as_dict(mapping.get("app_layout"))
+    return [s for s in as_list(app_layout.get("sheets")) if isinstance(s, dict)]
+
+
 def visuals(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Flat list of visuals, whichever shape the mapping agent used."""
     block = mapping.get("visuals")
@@ -149,14 +160,19 @@ def visuals(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
         found = block.get("sheet_visuals") or block.get("visuals") or []
     else:
         found = block or mapping.get("visualizations") or []
-    return [v for v in as_list(found) if isinstance(v, dict)]
+    if found:
+        return [v for v in as_list(found) if isinstance(v, dict)]
 
-
-def sheets(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
-    block = mapping.get("visuals")
-    if isinstance(block, dict) and block.get("sheets"):
-        return [s for s in as_list(block["sheets"]) if isinstance(s, dict)]
-    return [s for s in as_list(mapping.get("sheets")) if isinstance(s, dict)]
+    # Also extract visuals defined inside sheets (e.g. app_layout.sheets or sheets)
+    result = []
+    for s in sheets(mapping):
+        sheet_title = text(s.get("sheet_name") or s.get("title") or s.get("name"), "Sheet")
+        for v in as_list(s.get("visuals")):
+            if isinstance(v, dict):
+                v_copy = dict(v)
+                v_copy.setdefault("sheet_name", sheet_title)
+                result.append(v_copy)
+    return result
 
 
 def connections(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:

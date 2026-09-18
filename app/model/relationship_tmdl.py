@@ -44,9 +44,11 @@ def _is_key_column(col_name: str) -> bool:
         return False
     if name.endswith("_id") or name.endswith("id") or name.endswith("_key") or name.endswith("key"):
         return True
-    if name.endswith("_code") or name.endswith("_no"):
+    if name.startswith("id_") or name.startswith("key_") or name.startswith("pk_") or name.startswith("fk_") or name.startswith("id") or name.startswith("key"):
         return True
-    if name.endswith("_date") or name.endswith("date"):
+    if name.endswith("_code") or name.endswith("_no") or name.startswith("code_") or name.startswith("no_"):
+        return True
+    if name.endswith("_date") or name.endswith("date") or name.startswith("date_"):
         return True
     return False
 
@@ -54,10 +56,10 @@ def _is_key_column(col_name: str) -> bool:
 def _endpoints(relationship: Dict[str, Any]) -> Tuple[str, str, str, str]:
     fabric = as_dict(relationship.get("fabric"))
     return (
-        text(relationship.get("source_table") or fabric.get("from_table")),
-        text(relationship.get("source_column") or fabric.get("from_column")),
-        text(relationship.get("target_table") or fabric.get("to_table")),
-        text(relationship.get("target_column") or fabric.get("to_column")),
+        text(relationship.get("source_table") or fabric.get("from_table") or relationship.get("from_table")),
+        text(relationship.get("source_column") or fabric.get("from_column") or relationship.get("from_column")),
+        text(relationship.get("target_table") or fabric.get("to_table") or relationship.get("to_table")),
+        text(relationship.get("target_column") or fabric.get("to_column") or relationship.get("to_column")),
     )
 
 
@@ -114,6 +116,8 @@ def _is_primary_key_for_table(
         f"{sing}_code", f"{sing}code",
         f"{sing}_no", f"{sing}no",
         f"{sing}_date", f"{sing}date",
+        f"id_{sing}", f"id{sing}",
+        f"key_{sing}", f"key{sing}",
     }
     if c in candidate_keys:
         return True
