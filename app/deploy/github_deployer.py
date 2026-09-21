@@ -169,14 +169,27 @@ def deploy(
     tree_entries: List[Dict[str, Any]] = []
     new_paths: set = set()
 
-    def _upload_blob(item: Tuple[str, str]) -> Tuple[str, str, str]:
+    def _upload_blob(item: Tuple[str, str]) -> Tuple[str, str]:
         path, content = item
-        blob_resp = session.post(
-            f"{base}/git/blobs",
-            json={"content": content, "encoding": "utf-8"},
-            timeout=120,
-        )
-        blob_data = _check(blob_resp, f"create blob {path}")
+        last_resp = None
+        for attempt in range(3):
+            try:
+                blob_resp = session.post(
+                    f"{base}/git/blobs",
+                    json={"content": content, "encoding": "utf-8"},
+                    timeout=120,
+                )
+                if blob_resp.status_code < 300:
+                    blob_data = blob_resp.json()
+                    entry_path = f"{prefix}/{path}".strip("/") if prefix else path.strip("/")
+                    return entry_path, blob_data["sha"]
+                last_resp = blob_resp
+            except Exception as e:
+                if attempt == 2:
+                    raise
+            import time
+            time.sleep(0.5 * (attempt + 1))
+        blob_data = _check(last_resp, f"create blob {path}")
         entry_path = f"{prefix}/{path}".strip("/") if prefix else path.strip("/")
         return entry_path, blob_data["sha"]
 
