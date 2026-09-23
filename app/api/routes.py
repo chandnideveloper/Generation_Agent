@@ -1,149 +1,109 @@
-"""HTTP surface for the generation agent."""
+"""Unified Generation Agent Routes.
 
-import io
+Exposes:
+- POST /migrate: Main entry point for Qlik and Tableau generation and deployment
+- GET /health: Health check endpoint
+"""
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+import logging
+from typing import Optional
+from fastapi import APIRouter, Depends, Header, status
+from fastapi.responses import JSONResponse
 
-from app.config import config
-from app.generator import generate
-from app.package import package_store, zip_builder
-from app.report.visual_catalog import MANUAL, NATIVE, SUBSTITUTIONS
-from app.schemas import Deploy, DownloadRequest, GenerateRequest, GenerateResponse, Target
-from app.sources.mapping_client import MappingNotFound, fetch_mapping
-from app.util.ids import safe_filename
-from app.util.logging_utils import get_logger
+from app.api.schemas import (
+    UnifiedErrorResponse,
+    UnifiedMigrateRequest,
+    UnifiedMigrateResponse,
+)
+from app.services.orchestrator import orchestrator
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/health")
-def health_endpoint():
-    # /health and / are owned by health() below (richer payload: targets,
-    # deploy readiness, mapping_api/output_dir). This route used to also
-    # claim /health with a shallower {"status": "ok"} body, and since it was
-    # registered first, FastAPI matched it before health() ever ran -
-    # silently shadowing the real health check and its `targets` field.
-    return {"status": "ok", "service": "generation-agent"}
+def _get_bearer_token(authorization: Optional[str] = Header(None)) -> Optional[str]:
+    if not authorization:
+        return None
+    parts = authorization.split()
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1]
+    return authorization
 
 
-@router.post("/generate", response_model=GenerateResponse)
-@router.post("/api/generate", response_model=GenerateResponse)
-@router.post("/generation", response_model=GenerateResponse)
-@router.post("/api/generation", response_model=GenerateResponse)
-@router.post("/tmdl", response_model=GenerateResponse)
-@router.post("/api/tmdl", response_model=GenerateResponse)
-def generate_endpoint(request: GenerateRequest):
-    """Build a Power BI package from a mapping result.
-
-    `/tmdl` is kept as an alias so existing callers keep working.
-    """
-    if not any([request.mapping_result, request.app_id, request.run_id]):
-        raise HTTPException(
-            status_code=400,
-            detail="Provide mapping_result, or an app_id / run_id to fetch it with.",
-        )
-
-    try:
-        document = request.mapping_result or fetch_mapping(request.app_id, request.run_id)
-    except MappingNotFound as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Could not load mapping: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Mapping fetch failed: {exc}") from exc
-
-    try:
-        return generate(document, request)
-    except (TypeError, ValueError, KeyError) as exc:
-        logger.exception("Generation failed")
-        raise HTTPException(status_code=500, detail=f"Generation failed: {exc}") from exc
+@router.get("/health", tags=["Health"])
+async def health():
+    return {
+        "status": "ok",
+        "service": "unified-generation-agent",
+        "supported_sources": ["qlik", "tableau"],
+        "target": "fabric",
+    }
 
 
-@router.post("/download")
-@router.post("/api/download")
-def download_endpoint(request: DownloadRequest):
-    """Return the generated PBIP folder as a .zip that opens directly in
-    Power BI Desktop.
-
-    Prefers the package `/generate` already cached for this run_id
-    (package_store); if nothing is cached, the mapping result is re-fetched
-    and generation is re-run (push_only, no disk write, no deploy) purely to
-    rebuild the same files for this download.
-    """
-    package = package_store.load(request.run_id)
-    app_name = request.app_name
-
-    if package is None:
-        try:
-            document = fetch_mapping(request.app_id, request.run_id)
-        except MappingNotFound as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Could not load mapping for download: %s", exc)
-            raise HTTPException(status_code=502, detail=f"Mapping fetch failed: {exc}") from exc
-
-        regen_request = GenerateRequest(
-            app_id=request.app_id,
-            run_id=request.run_id,
-            app_name=request.app_name,
-            target=Target.POWERBI_DESKTOP,
-            deploy=Deploy.NONE,
-            write_to_disk=False,
-            push_only=True,
-            include_artifacts=False,
-        )
-        try:
-            result = generate(document, regen_request)
-        except (TypeError, ValueError, KeyError) as exc:
-            logger.exception("Regeneration for download failed")
-            raise HTTPException(status_code=500, detail=f"Generation failed: {exc}") from exc
-        app_name = app_name or result.get("app_name")
-        package = package_store.load(request.run_id)
-
-    if not package:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No package found for run_id={request.run_id!r}. Run /generate first.",
-        )
-
-    zip_bytes = zip_builder.build_zip(package)
-    filename = f"{safe_filename(app_name or request.run_id, 'QlikApp')}.zip"
-    return StreamingResponse(
-        io.BytesIO(zip_bytes),
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+@router.post(
+    "/migrate",
+    response_model=UnifiedMigrateResponse,
+    responses={
+        400: {"model": UnifiedErrorResponse},
+        404: {"model": UnifiedErrorResponse},
+        500: {"model": UnifiedErrorResponse},
+    },
+    summary="Migrate Qlik or Tableau report to Fabric (TMDL/PBIR) deployed to GitHub",
+)
+async def migrate(
+    request: UnifiedMigrateRequest,
+    token: Optional[str] = Depends(_get_bearer_token),
+):
+    logger.info(
+        f"[POST /migrate] Received request: source_type={request.source_type}, run_id={request.run_id}"
     )
 
+    try:
+        response = await orchestrator.execute_migration(request, client_token=token)
+        return response
 
-@router.get("/visual-support")
-def visual_support():
-    """What converts natively, what gets substituted, and what needs work."""
-    return {
-        "native": sorted(NATIVE),
-        "substituted": {
-            qlik: {"mapped_to": target, "reason": reason, "suggestion": suggestion}
-            for qlik, (target, reason, suggestion) in SUBSTITUTIONS.items()
-        },
-        "manual": {
-            qlik: {"reason": reason, "suggestion": suggestion}
-            for qlik, (reason, suggestion) in MANUAL.items()
-        },
-    }
+    except ValueError as ve:
+        err_msg = str(ve)
+        is_not_found = "not found" in err_msg.lower()
+        status_code = status.HTTP_404_NOT_FOUND if is_not_found else status.HTTP_400_BAD_REQUEST
+        error_code = "RESOURCE_NOT_FOUND" if is_not_found else "INVALID_REQUEST"
+        logger.warning(f"[POST /migrate] Client error ({status_code}): {err_msg}")
+        return JSONResponse(
+            status_code=status_code,
+            content=UnifiedErrorResponse(
+                status="error",
+                source_type=getattr(request, "source_type", None),
+                run_id=getattr(request, "run_id", None),
+                service=f"{request.source_type}-generation",
+                error_code=error_code,
+                message=err_msg,
+            ).model_dump(),
+        )
 
+    except RuntimeError as re:
+        logger.error(f"[POST /migrate] Generation runtime error: {re}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=UnifiedErrorResponse(
+                status="error",
+                source_type=getattr(request, "source_type", None),
+                run_id=getattr(request, "run_id", None),
+                service=f"{request.source_type}-generation",
+                error_code="GENERATION_EXECUTION_ERROR",
+                message=str(re),
+            ).model_dump(),
+        )
 
-@router.get("/")
-@router.get("/health")
-def health():
-    return {
-        "status": "healthy",
-        "service": "qlik-generation-agent",
-        "targets": ["powerbi_desktop", "fabric", "semantic_model_only"],
-        "deploy": {
-            "fabric": "per-request token",
-            "github": config.github_ready(),
-            "devops": config.devops_ready(),
-        },
-        "mapping_api": config.MONGO_API_URL,
-        "output_dir": config.OUTPUT_DIR,
-    }
+    except Exception as e:
+        logger.exception(f"[POST /migrate] Unexpected exception: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=UnifiedErrorResponse(
+                status="error",
+                source_type=getattr(request, "source_type", None),
+                run_id=getattr(request, "run_id", None),
+                service="unified-generation-agent",
+                error_code="INTERNAL_SERVER_ERROR",
+                message=f"An unexpected error occurred during migration: {str(e)}",
+            ).model_dump(),
+        )

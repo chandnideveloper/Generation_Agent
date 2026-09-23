@@ -1,9 +1,23 @@
-__pycache__/
-*.pyc
-.pytest_cache/
+# Environment variables
 .env
+.env.local
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Deadletter / logs
+*.log
+app/deadletter_store/
+failed_cosmos_writes.jsonl
+
+# OS / Editor
+# Local runs & scratch
 generated/
-legacy/
-venv/
+response/
 scratch/
+legacy/
 mapping.json
+.pytest_cache/

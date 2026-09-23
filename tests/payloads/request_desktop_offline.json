@@ -1,6 +1,0 @@
-{
-  "run_id": "demo-run-001",
-  "target": "powerbi_desktop",
-  "offline_sample_data": true,
-  "include_artifacts": false
-}

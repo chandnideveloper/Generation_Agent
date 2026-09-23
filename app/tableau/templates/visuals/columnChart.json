@@ -1,0 +1,66 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "",
+  "position": {
+    "x": 300,
+    "y": 80,
+    "z": 0,
+    "height": 400,
+    "width": 600,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "columnChart",
+    "query": {},
+    "objects": {
+      "general": [
+        {
+          "properties": {}
+        }
+      ],
+      "title": [
+        {
+          "properties": {
+            "title": {
+              "expr": {
+                "Literal": {
+                  "Value": "''"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "categoryAxis": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "valueAxis": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  },
+  "filterConfig": {
+    "filters": []
+  }
+}

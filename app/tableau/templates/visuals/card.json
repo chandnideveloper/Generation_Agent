@@ -1,0 +1,45 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "",
+  "position": {
+    "x": 50,
+    "y": 80,
+    "z": 0,
+    "height": 150,
+    "width": 250,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "card",
+    "query": {},
+    "objects": {
+      "general": [
+        {
+          "properties": {}
+        }
+      ],
+      "labels": [
+        {
+          "properties": {
+            "color": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "ThemeDataColor": {
+                      "ColorId": 1,
+                      "Percent": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  },
+  "filterConfig": {
+    "filters": []
+  }
+}

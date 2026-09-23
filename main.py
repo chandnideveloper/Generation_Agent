@@ -1,54 +1,63 @@
-"""Qlik Generation Agent — FastAPI entry point.
+"""Unified Generation Agent — Single FastAPI service running exclusively on port 5000.
 
-Turns a mapping-agent Contract 2.0 payload into Power BI artifacts:
-
-    powerbi_desktop      PBIP folder that opens in Power BI Desktop
-    fabric               same artifacts, pushed to a Fabric workspace
-    semantic_model_only  TMDL model without a report
-
-and deploys via `none`, `fabric`, `github` or `devops`.
-
-Generation is entirely deterministic — no LLM is involved, so the same
-mapping payload always produces byte-identical files.
+Consolidates Qlik Generation Agent, Tableau Generation Agent, and Unified Gateway
+into a single process.
+Zero inter-service HTTP calls.
+Direct in-process Python invocation.
 """
+
+import sys
+from pathlib import Path
+
+# Add project root to sys.path so modules resolve cleanly
+ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+# Provide package compatibility mappings for internal sub-packages
+import app.qlik
+import app.tableau
+sys.modules["app.qlik"] = app.qlik
+sys.modules["app.tableau"] = app.tableau
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 
-from app.api.routes import router
-from app.config import config
-from app.util.logging_utils import get_logger, setup_logging
+# Load unified environment configuration
+load_dotenv(override=True)
 
-logger = get_logger(__name__)
+from app.api.routes import router as migration_router
 
 
 def create_app() -> FastAPI:
-    setup_logging()
     application = FastAPI(
-        title="Qlik Generation Agent",
-        version="3.0.0",
-        description="Qlik Sense to Power BI / Microsoft Fabric artifact generation.",
+        title="Unified Generation Agent",
+        version="1.0.0",
+        description="Unified Qlik and Tableau to Fabric / Power BI Generation Service.",
     )
+
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    application.include_router(router)
 
-    logger.info(
-        "Generation agent ready — mapping=%s output=%s github=%s devops=%s",
-        config.MONGO_API_URL, config.OUTPUT_DIR,
-        config.github_ready(), config.devops_ready(),
-    )
+    application.include_router(migration_router)
     return application
 
 
 app = create_app()
 
-
 if __name__ == "__main__":
     import uvicorn
+    import os
 
-    uvicorn.run(app, host="0.0.0.0", port=config.PORT)
+    port = int(os.getenv("PORT", "5000"))
+    print(f"============================================================")
+    print(f" Starting Unified Generation Agent on http://0.0.0.0:{port}")
+    print(f" Single service - Qlik and Tableau generation in one process")
+    print(f"============================================================")
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
