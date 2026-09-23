@@ -7,17 +7,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.pytest_cache/
 
 # Deadletter / logs
 *.log
 app/deadletter_store/
 failed_cosmos_writes.jsonl
 
-# OS / Editor
 # Local runs & scratch
 generated/
 response/
 scratch/
 legacy/
 mapping.json
-.pytest_cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

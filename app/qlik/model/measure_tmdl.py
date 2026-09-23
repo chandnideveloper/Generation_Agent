@@ -349,7 +349,7 @@ def group_by_table(
 ) -> Dict[str, Dict[str, List[str]]]:
     """Return {table: {"measures": [...], "columns": [...]}}."""
     grouped: Dict[str, Dict[str, List[str]]] = {}
-    seen_measures_per_table: Dict[str, Set[str]] = {}
+    seen_measures_global: Set[str] = set()
 
     for measure in measures:
         if not isinstance(measure, dict):
@@ -362,10 +362,9 @@ def group_by_table(
             "Measure",
         )
         c_name = clean_tmdl_name(raw_name).lower()
-        seen = seen_measures_per_table.setdefault(table.lower(), set())
-        if c_name in seen:
+        if c_name in seen_measures_global:
             continue
-        seen.add(c_name)
+        seen_measures_global.add(c_name)
 
         grouped.setdefault(table, {"measures": [], "columns": []})
         grouped[table]["measures"].append(build_measure(measure, problems, valid_columns=valid_columns))
