@@ -1,6 +1,7 @@
 """Fetch the mapping result from the MongoDB microservice."""
 
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -35,6 +36,10 @@ def _rows(payload: Any) -> List[Dict[str, Any]]:
     return [payload] if isinstance(payload, dict) else []
 
 
+def _norm(s: Any) -> str:
+    return re.sub(r"[\s_\-]+", "-", str(s).strip().lower())
+
+
 def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Optional[str]) -> bool:
     """True when `row` really is the mapping for the requested app/run.
 
@@ -60,8 +65,10 @@ def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Option
         if not requested:
             continue
         stated = _candidates(key)
-        if stated and str(requested).strip() not in stated:
-            return False
+        if stated:
+            norm_stated = {_norm(s) for s in stated}
+            if _norm(requested) not in norm_stated:
+                return False
     return True
 
 
@@ -93,19 +100,32 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
     if not (run_id or app_id):
         raise MappingNotFound("A run_id or app_id is required to fetch a mapping result.")
 
+    def _id_variants(val: str) -> List[str]:
+        raw = val.strip()
+        v = [raw]
+        hyphenated = re.sub(r"[\s_]+", "-", raw)
+        spaced = re.sub(r"[-_]+", " ", raw)
+        if hyphenated not in v:
+            v.append(hyphenated)
+        if spaced not in v:
+            v.append(spaced)
+        return v
+
     paths = []
     if run_id:
-        paths.extend([
-            f"/mapping/by-run/{run_id}",
-            f"/api/mapping/by-run/{run_id}",
-            f"/api/mapping/{run_id}",
-        ])
+        for r in _id_variants(run_id):
+            paths.extend([
+                f"/mapping/by-run/{r}",
+                f"/api/mapping/by-run/{r}",
+                f"/api/mapping/{r}",
+            ])
     if app_id:
-        paths.extend([
-            f"/mapping/by-app/{app_id}",
-            f"/api/mapping/by-app/{app_id}",
-            f"/api/mapping/{app_id}",
-        ])
+        for a in _id_variants(app_id):
+            paths.extend([
+                f"/mapping/by-app/{a}",
+                f"/api/mapping/by-app/{a}",
+                f"/api/mapping/{a}",
+            ])
 
     rejected = 0
     for base in _bases():

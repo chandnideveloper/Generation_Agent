@@ -1419,21 +1419,7 @@ class ReportGenerator:
                         z_idx += 1
                         tab_ord += 1
 
-                    # 2. Action Button for Navigation (Full Page Overlay)
-                    is_nav = "page navigation" in pe.get("implementation_type", "").lower() or ta.get("type", "").lower() == "navigation"
-                    if is_nav:
-                        btn_vis = self._build_action_button_visual(act, sheet_name_to_id)
-                        if btn_vis:
-                            pg_json = page_entry.get("page_json", {})
-                            btn_vis["position"] = {
-                                "x": 0, "y": 0, "z": z_idx + 10,
-                                "height": pg_json.get("height", 720),
-                                "width": pg_json.get("width", 1280),
-                                "tabOrder": tab_ord
-                            }
-                            page_visuals.append(btn_vis)
-                            z_idx += 1
-                            tab_ord += 1
+                    # Full page overlay navigation buttons are removed; only explicit visual navigation is kept.
 
         
         return page_visuals

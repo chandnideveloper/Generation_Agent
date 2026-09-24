@@ -371,16 +371,7 @@ class DashboardBuilderMixin:
             src_dash = self._normalize_for_matching(pe.get("source_dashboard") or ta.get("source_dashboard", ""))
             src_vis = self._normalize_for_matching(pe.get("source_visual") or ta.get("source_worksheet", ""))
             
-            # --- Forward Navigation ---
             if src_dash == dash_name_norm and (src_vis in ["all sheets", ""] or not src_vis):
-                is_nav = "page navigation" in pe.get("implementation_type", "").lower() or ta.get("type", "").lower() == "navigation"
-                if is_nav:
-                    btn = self._build_action_button_visual(act, sheet_name_to_id)
-                    if btn:
-                        # Full page overlay if it's dashboard level
-                        btn["position"] = {"x": 0, "y": 0, "z": z_idx + 50, "height": page_height, "width": page_width, "tabOrder": tab_ord + 50}
-                        page_visuals.append(btn)
-                
                 # HTML Overlay
                 html = self._build_html_content_visual(act, default_table)
                 if html:
@@ -411,7 +402,6 @@ class DashboardBuilderMixin:
                         for pv in page_visuals:
                             pos = pv.get("position", {})
                             if pos and "y" in pos and "height" in pos:
-                                # Avoid matching full page overlay buttons that span the entire page_height
                                 if pos.get("height", 0) < page_height:
                                     max_y = max(max_y, pos["y"] + pos["height"])
                         
@@ -419,27 +409,6 @@ class DashboardBuilderMixin:
                         html["position"] = {"x": 20, "y": html_y, "z": z_idx + 40, "height": 300, "width": 400, "tabOrder": tab_ord + 40}
                     
                     page_visuals.append(html)
-
-            # --- Symmetrical Back Navigation ---
-            target_sheet = pe.get("target_page") or ta.get("target_sheet")
-            if target_sheet and self._normalize_for_matching(target_sheet) == dash_name_norm:
-                is_nav = "page navigation" in pe.get("implementation_type", "").lower() or ta.get("type", "").lower() == "navigation"
-                if is_nav:
-                    # Determine source page display name
-                    source_label = pe.get("source_dashboard") or ta.get("source_dashboard") or ta.get("source_worksheet")
-                    if source_label and source_label not in added_back_targets:
-                        # Create a "Back" version of the action
-                        back_act = {
-                            "tableau_action": {"type": "navigation", "target_sheet": source_label},
-                            "powerbi_equivalent": {"implementation_type": "page navigation", "target_page": source_label}
-                        }
-                        back_btn = self._build_action_button_visual(back_act, sheet_name_to_id, label=f"Back to {source_label}")
-                        if back_btn:
-                            # Place at top-left, slightly offset if there's a title
-                            by = 10 if not visual_title else 70
-                            back_btn["position"] = {"x": 20, "y": by, "z": z_idx + 150, "height": 40, "width": 200, "tabOrder": tab_ord + 150}
-                            page_visuals.append(back_btn)
-                            added_back_targets.add(source_label)
 
         # Slicers on panel if not already placed from hierarchy
         if all_page_slicers and not any(v.get("visual", {}).get("visualType") == "slicer" for v in page_visuals):

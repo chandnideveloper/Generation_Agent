@@ -1167,24 +1167,7 @@ class PageBuilderMixin(FilterBuilderMixin, SlicerBuilderMixin, ProjectionBuilder
                             btn_vis["position"]["z"] = visual_container["position"].get("z", 0) + 1
                             page_visuals.append(btn_vis)
 
-                    # --- Symmetrical Back Navigation ---
-                    target_sheet = pe.get("target_page") or ta.get("target_sheet")
-                    if target_sheet and self._normalize_for_matching(target_sheet) == norm_page:
-                        # Determine source page display name
-                        source_label = pe.get("source_dashboard") or ta.get("source_dashboard") or ta.get("source_worksheet")
-                        if source_label and source_label not in added_back_targets:
-                            # Create a "Back" version of the action
-                            back_act = {
-                                "tableau_action": {"type": "navigation", "target_sheet": source_label},
-                                "powerbi_equivalent": {"implementation_type": "page navigation", "target_page": source_label}
-                            }
-                            back_btn = self._build_action_button_visual(back_act, sheet_name_to_id, label=f"Back to {source_label}")
-                            if back_btn:
-                                # Place at top-left, slightly offset if there's a title
-                                by = current_y if not visual_title else current_y - 60
-                                back_btn["position"] = {"x": 20, "y": by, "z": 200, "height": 40, "width": 200, "tabOrder": 0}
-                                page_visuals.append(back_btn)
-                                added_back_targets.add(source_label)
+                    # Only actions explicitly defined for this sheet/visual in mapping are added.
 
             # =========================================================
 
