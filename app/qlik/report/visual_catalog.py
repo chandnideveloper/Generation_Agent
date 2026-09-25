@@ -12,7 +12,7 @@ Nothing here calls a model. The mapping is a lookup table plus a small amount
 of shape logic, so the same input always produces the same output.
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # Direct equivalents.
 NATIVE = {
@@ -187,14 +187,92 @@ PLACEHOLDER = "textbox"
 # its safe substitution rather than emitted as-is.
 CUSTOM_VISUAL_ONLY_TYPES = {"boxPlot", "sankeyDiagram"}
 
+PBI_NAME_MAP = {
+    "clustered column chart": "clusteredColumnChart",
+    "clustered col chart": "clusteredColumnChart",
+    "clusteredcolumnchart": "clusteredColumnChart",
+    "clustered bar chart": "clusteredBarChart",
+    "clusteredbarchart": "clusteredBarChart",
+    "bar chart": "barChart",
+    "barchart": "barChart",
+    "column chart": "columnChart",
+    "columnchart": "columnChart",
+    "line and clustered column chart": "lineClusteredColumnComboChart",
+    "line and stacked column chart": "lineStackedColumnComboChart",
+    "combo chart": "lineClusteredColumnComboChart",
+    "combochart": "lineClusteredColumnComboChart",
+    "pie chart": "pieChart",
+    "piechart": "pieChart",
+    "donut chart": "donutChart",
+    "donutchart": "donutChart",
+    "card": "card",
+    "kpi": "card",
+    "slicer": "slicer",
+    "table": "tableEx",
+    "tableex": "tableEx",
+    "matrix": "pivotTable",
+    "pivot table": "pivotTable",
+    "pivottable": "pivotTable",
+    "scatter chart": "scatterChart",
+    "scatter plot": "scatterChart",
+    "scatterchart": "scatterChart",
+    "treemap": "treemap",
+    "gauge": "gauge",
+    "waterfall chart": "waterfallChart",
+    "waterfallchart": "waterfallChart",
+    "funnel": "funnel",
+    "area chart": "areaChart",
+    "areachart": "areaChart",
+    "standard": "standard",
+}
 
-def resolve(qlik_type: str, is_extension: bool = False) -> Tuple[str, str, Optional[str], Optional[str]]:
+
+def resolve_pbi_type(
+    pbi_type_input: Any,
+    qlik_type: str = "",
+    num_dims: int = 0,
+    num_meas: int = 0,
+) -> Optional[Tuple[str, str, Optional[str], Optional[str]]]:
+    """Resolve a Power BI visual type from an upstream mapping string or dict."""
+    raw = ""
+    if isinstance(pbi_type_input, dict):
+        raw = pbi_type_input.get("power_bi_visual_type") or pbi_type_input.get("visual_type") or ""
+    elif isinstance(pbi_type_input, str):
+        raw = pbi_type_input
+
+    clean = str(raw).strip().lower()
+    if clean in PBI_NAME_MAP:
+        vt = PBI_NAME_MAP[clean]
+        if vt == "standard":
+            if num_meas > 0 and num_dims == 0:
+                return ("card", "native", None, None)
+            if num_dims > 0 and num_meas == 0:
+                return ("slicer", "native", None, None)
+            return ("clusteredColumnChart", "native", None, None)
+        return (vt, "native", None, None)
+
+    return None
+
+
+def resolve(
+    qlik_type: str,
+    is_extension: bool = False,
+    num_dims: int = 0,
+    num_meas: int = 0,
+) -> Tuple[str, str, Optional[str], Optional[str]]:
     """Return (visual_type, severity, reason, suggestion)."""
     key = (qlik_type or "").strip().lower()
 
     if is_extension and key not in SUBSTITUTIONS and key not in NATIVE:
         reason, suggestion = MANUAL["extension"]
         return PLACEHOLDER, "manual", reason, suggestion
+
+    if key == "auto-chart":
+        if num_meas > 0 and num_dims == 0:
+            return ("card", "native", None, None)
+        if num_dims > 0 and num_meas == 0:
+            return ("slicer", "native", None, None)
+        return ("clusteredColumnChart", "native", None, None)
 
     if key in SUBSTITUTIONS:
         visual, reason, suggestion = SUBSTITUTIONS[key]

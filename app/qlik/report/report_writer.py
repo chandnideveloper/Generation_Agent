@@ -51,14 +51,22 @@ def _entity_maps(mapping: Dict[str, Any]):
     and measures in the mapping payload without hardcoded lookups.
     """
     known_tables = {
-        _clean_table_name(text(t.get("name") or t.get("table_name")))
+        _clean_table_name(text(t.get("bi_table_name") or t.get("name") or t.get("table_name")))
         for t in P.tables(mapping)
     }
     measure_home: Dict[str, str] = {}
     for measure in P.measures(mapping):
         name = text(measure.get("name"))
         tables = measure.get("tables") or []
-        raw_tbl = text(tables[0]) if tables else text(as_dict(measure.get("fabric")).get("table"))
+        raw_tbl = (
+            text(tables[0])
+            if tables
+            else text(
+                measure.get("table")
+                or measure.get("table_name")
+                or as_dict(measure.get("fabric")).get("table")
+            )
+        )
         home_candidate = _clean_table_name(raw_tbl) if raw_tbl else ""
         home = home_candidate if home_candidate in known_tables else "_Measures"
         if name:
@@ -69,10 +77,11 @@ def _entity_maps(mapping: Dict[str, Any]):
 
     # 1. Map all physical columns from tables
     for table in P.tables(mapping):
-        table_name = _clean_table_name(text(table.get("name") or table.get("table_name")))
+        table_name = _clean_table_name(text(table.get("bi_table_name") or table.get("name") or table.get("table_name")))
         for column in (table.get("columns") or table.get("fields") or []):
             column_name = text(
-                as_dict(column).get("fabric_column_name")
+                as_dict(column).get("bi_column_name")
+                or as_dict(column).get("fabric_column_name")
                 or as_dict(column).get("qlik_column_name")
                 or as_dict(column).get("name")
             )
@@ -111,8 +120,8 @@ def _entity_maps(mapping: Dict[str, Any]):
     for dimension in P.dimensions(mapping):
         name = text(dimension.get("name")).strip()
         dim_fabric = as_dict(dimension.get("fabric"))
-        dim_table = _clean_table_name(text(dim_fabric.get("table") or (dimension.get("tables") or [""])[0]))
-        dax_expr = text(dim_fabric.get("dax_expression") or dim_fabric.get("tmdl"))
+        dim_table = _clean_table_name(text(dim_fabric.get("table") or dimension.get("target_table") or dimension.get("table_name") or (dimension.get("tables") or [""])[0]))
+        dax_expr = text(dim_fabric.get("dax_expression") or dim_fabric.get("tmdl") or dimension.get("dax_formula"))
 
         # Check if the dimension references a specific column like 'Customers'[customer_name]
         col_match = re.search(r"'([^']+)'\[([^\]]+)\]", dax_expr)
@@ -139,14 +148,24 @@ def _entity_maps(mapping: Dict[str, Any]):
                 if name not in column_home:
                     column_home[name] = dim_table
 
-    # 3. Map all master measures explicitly
+    # 3. Map all master measures explicitly and build formula_to_measure lookup
+    formula_to_measure: Dict[str, Tuple[str, str, bool]] = {}
     for measure in P.measures(mapping):
         name = text(measure.get("name")).strip()
         if name:
             home = measure_home.get(name, "_Measures")
             field_resolver[name.lower()] = (home, name)
+            norm_n = re.sub(r"\s+", " ", name).strip().lower()
+            formula_to_measure[norm_n] = (home, name, True)
+            formula_to_measure[name.lower()] = (home, name, True)
 
-    return measure_home, column_home, field_resolver
+            qlik_formula = text(measure.get("qlik_formula") or measure.get("expression") or measure.get("qlik_expression")).strip()
+            if qlik_formula:
+                norm_q = re.sub(r"\s+", " ", qlik_formula).strip().lower()
+                formula_to_measure[norm_q] = (home, name, True)
+                formula_to_measure[qlik_formula.lower()] = (home, name, True)
+
+    return measure_home, column_home, field_resolver, formula_to_measure
 
 
 def _auto_register_expression_labels(
@@ -189,7 +208,7 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
     """Return (files, notes, report)."""
     visuals = P.visuals(mapping)
     sheets = {text(s.get("sheet_name") or s.get("title")): s for s in P.sheets(mapping)}
-    measure_home, column_home, field_resolver = _entity_maps(mapping)
+    measure_home, column_home, field_resolver, formula_to_measure = _entity_maps(mapping)
     _auto_register_expression_labels(mapping, measure_home, column_home)
 
     # Process report-level and page-level filters from mapping with strict de-duplication
@@ -225,12 +244,38 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
                     report_filters.append(built_f)
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
+    vis_to_sheet: Dict[str, str] = {}
     for s in P.sheets(mapping):
         stitle = text(s.get("title") or s.get("name") or s.get("sheet_name"))
-        if stitle:
-            grouped.setdefault(stitle, [])
+        if not stitle:
+            continue
+        grouped.setdefault(stitle, [])
+        sid = text(s.get("sheet_id") or s.get("id"))
+        if sid:
+            vis_to_sheet[sid] = stitle
+        for vid in as_list(s.get("visualization_ids") or s.get("visual_ids")):
+            v_str = text(vid)
+            if v_str:
+                vis_to_sheet[v_str] = stitle
+
+    def _resolve_visual_sheet(v: Dict[str, Any]) -> str:
+        src = as_dict(v.get("qlik_source")) or v
+        s_name = text(src.get("sheet_name") or src.get("source") or v.get("sheet_name"))
+        if s_name and s_name != "Unassigned":
+            return s_name
+        for id_key in ("sheet_id", "id", "visualization_id", "object_id", "name", "visual_title"):
+            val = text(v.get(id_key) or src.get(id_key))
+            if val and val in vis_to_sheet:
+                return vis_to_sheet[val]
+        return "Unassigned"
+
     for visual in visuals:
-        grouped.setdefault(_sheet_key(visual), []).append(visual)
+        sheet_k = _resolve_visual_sheet(visual)
+        grouped.setdefault(sheet_k, []).append(visual)
+
+    if "Unassigned" in grouped and not grouped["Unassigned"] and len(grouped) > 1:
+        del grouped["Unassigned"]
+
     if not grouped:
         grouped["Page 1"] = []
 
@@ -267,23 +312,25 @@ def build_report(mapping: Dict[str, Any], app_name: str, model_path: str):
 
     for sheet_name, sheet_visuals in grouped.items():
         page_id = page_ids[sheet_name]
-        grid = layout_util.sheet_grid(sheets.get(sheet_name, {}), visuals=sheet_visuals)
-        columns, rows = grid
+        sheet_obj = sheets.get(sheet_name, {})
+        grid = layout_util.sheet_grid(sheet_obj, visuals=sheet_visuals)
 
-        # Calculate exact sheet page height based on Qlik row count and visual bounds
-        base_height = max(config.CANVAS_HEIGHT, int(round(rows * 60.0))) if rows > 12 else config.CANVAS_HEIGHT
-        max_bottom = 0
-        for position, visual in enumerate(sheet_visuals):
-            c_test = layout_util.to_canvas(visual, grid, position, canvas_height=base_height)
-            max_bottom = max(max_bottom, c_test["y"] + c_test["height"])
-
-        page_height = max(base_height, max_bottom + 40)
+        # Calculate optimal non-overlapping canvas layout
+        canvas_rects, page_height = layout_util.compute_sheet_layout(
+            sheet_visuals, grid, sheet_obj=sheet_obj
+        )
         display_option = "FitToWidth" if page_height > config.CANVAS_HEIGHT else "FitToPage"
 
         for position, visual in enumerate(sheet_visuals):
-            canvas = layout_util.to_canvas(visual, grid, position, canvas_height=page_height)
+            canvas = canvas_rects[position] if position < len(canvas_rects) else layout_util.to_canvas(visual, grid, position, canvas_height=page_height)
             document, note, stats = build_visual(
-                visual, canvas, position, measure_home, column_home, field_resolver=field_resolver
+                visual,
+                canvas,
+                position,
+                measure_home,
+                column_home,
+                field_resolver=field_resolver,
+                formula_to_measure=formula_to_measure,
             )
             visual_id = safe_filename(document["name"], f"visual{position}")
             files[f"definition/pages/{page_id}/visuals/{visual_id}/visual.json"] = (

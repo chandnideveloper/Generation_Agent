@@ -43,9 +43,11 @@ def unwrap_mapping(document: Any) -> Dict[str, Any]:
     if isinstance(flat_cols, list):
         for c in flat_cols:
             if isinstance(c, dict):
-                tbl = str(c.get("fabric_table") or c.get("qlik_table") or "").strip().lower()
+                tbl = str(c.get("fabric_table") or c.get("qlik_table") or c.get("bi_table_name") or c.get("table") or "").strip().lower()
                 if tbl:
                     col_dict = dict(c)
+                    if "bi_column_name" in col_dict and "name" not in col_dict:
+                        col_dict["name"] = col_dict["bi_column_name"]
                     if "fabric_column" in col_dict and "fabric_column_name" not in col_dict:
                         col_dict["fabric_column_name"] = col_dict["fabric_column"]
                     if "qlik_column" in col_dict and "qlik_column_name" not in col_dict:
@@ -53,7 +55,8 @@ def unwrap_mapping(document: Any) -> Dict[str, Any]:
                     if "target_data_type" in col_dict and "fabric_datatype" not in col_dict:
                         col_dict["fabric_datatype"] = col_dict["target_data_type"]
                     col_name = str(
-                        col_dict.get("fabric_column_name")
+                        col_dict.get("bi_column_name")
+                        or col_dict.get("fabric_column_name")
                         or col_dict.get("fabric_column")
                         or col_dict.get("qlik_column_name")
                         or col_dict.get("qlik_column")
@@ -68,39 +71,118 @@ def unwrap_mapping(document: Any) -> Dict[str, Any]:
     if isinstance(tbls, list):
         for t in tbls:
             if isinstance(t, dict):
-                t_name = str(t.get("fabric_table_name") or t.get("qlik_table_name") or t.get("name") or t.get("table_name") or "").strip()
+                t_name = str(
+                    t.get("bi_table_name")
+                    or t.get("fabric_table_name")
+                    or t.get("qlik_table_name")
+                    or t.get("name")
+                    or t.get("table_name")
+                    or ""
+                ).strip()
                 if t_name and not t.get("name"):
                     t["name"] = t_name
                 if t_name and not t.get("table_name"):
                     t["table_name"] = t_name
-                if not t.get("columns") and t_name and t_name.lower() in cols_by_table:
+                if t_name and not t.get("bi_table_name"):
+                    t["bi_table_name"] = t_name
+                # Normalize column names inside the table
+                if isinstance(t.get("columns"), list):
+                    for col in t["columns"]:
+                        if isinstance(col, dict):
+                            c_name = str(
+                                col.get("bi_column_name")
+                                or col.get("fabric_column_name")
+                                or col.get("qlik_column_name")
+                                or col.get("name")
+                                or ""
+                            ).strip()
+                            if c_name and not col.get("name"):
+                                col["name"] = c_name
+                            if c_name and not col.get("bi_column_name"):
+                                col["bi_column_name"] = c_name
+                elif not t.get("columns") and t_name and t_name.lower() in cols_by_table:
                     t["columns"] = cols_by_table[t_name.lower()]
                 if t.get("source_query") and not t.get("qlik_query"):
                     t["qlik_query"] = t["source_query"]
 
     # Normalize measures
-    meas = res.get("measures") or res.get("dax_measures")
+    meas = res.get("measures") or res.get("dax_measures") or []
     if isinstance(meas, list):
         for m in meas:
             if isinstance(m, dict):
                 m_name = str(m.get("fabric_measure_name") or m.get("qlik_measure_name") or m.get("name") or "").strip()
                 if m_name and not m.get("name"):
                     m["name"] = m_name
-                m_dax = str(m.get("dax") or m.get("dax_expression") or m.get("target_expression") or "").strip()
-                if m_dax and not m.get("dax_expression"):
-                    m["dax_expression"] = m_dax
+                m_dax = str(
+                    m.get("dax_formula")
+                    or m.get("dax_expression")
+                    or m.get("dax")
+                    or m.get("target_expression")
+                    or ""
+                ).strip()
+                if m_dax:
+                    if not m.get("dax_expression"):
+                        m["dax_expression"] = m_dax
+                    if not m.get("dax_formula"):
+                        m["dax_formula"] = m_dax
+                m_qlik = str(m.get("qlik_formula") or m.get("qlik_expression") or m.get("expression") or "").strip()
+                if m_qlik and not m.get("qlik_formula"):
+                    m["qlik_formula"] = m_qlik
+                m_tbl = str(m.get("table") or m.get("table_name") or "").strip()
+                if m_tbl:
+                    if not m.get("table"):
+                        m["table"] = m_tbl
+                    if not m.get("table_name"):
+                        m["table_name"] = m_tbl
 
-    # Normalize visuals
+    # Normalize dimensions & calculated fields
+    calc_blocks = res.get("Calculated Fields & Set Expressions") or []
+    if isinstance(calc_blocks, list):
+        for blk in calc_blocks:
+            if isinstance(blk, dict) and "calculated_fields" in blk:
+                cfields = blk.get("calculated_fields") or []
+                for cf in cfields:
+                    if isinstance(cf, dict):
+                        cf_name = str(cf.get("name") or "").strip()
+                        cf_dax = str(cf.get("dax_formula") or cf.get("dax_expression") or "").strip()
+                        cf_tbl = str(cf.get("target_table") or cf.get("table_name") or "").strip()
+                        if cf_name and cf_dax:
+                            # Attach as calculated column to target table if not already present
+                            for t in (res.get("tables") or []):
+                                if isinstance(t, dict):
+                                    tname = str(t.get("bi_table_name") or t.get("name") or "").strip().lower()
+                                    if tname == cf_tbl.lower():
+                                        cols = t.setdefault("columns", [])
+                                        if not any(c.get("name") == cf_name for c in cols if isinstance(c, dict)):
+                                            cols.append({
+                                                "name": cf_name,
+                                                "bi_column_name": cf_name,
+                                                "is_calculated": True,
+                                                "dax_formula": cf_dax,
+                                                "bi_datatype": cf.get("power_bi_datatype") or "Text",
+                                            })
+
+    # Normalize visuals (handling both list and dict {sheet_visuals: [...]})
     vis = res.get("visuals")
+    vis_list = []
     if isinstance(vis, list):
-        for v in vis:
-            if isinstance(v, dict):
-                sheet = v.get("sheet") or v.get("sheet_name")
-                if sheet and not v.get("sheet_name"):
-                    v["sheet_name"] = sheet
-                v_type = v.get("power_bi_visual_type") or v.get("qlik_visual_type") or v.get("type")
-                if v_type and not v.get("type"):
-                    v["type"] = v_type
+        vis_list = vis
+    elif isinstance(vis, dict):
+        vis_list = vis.get("sheet_visuals") or vis.get("visuals") or []
+    for v in vis_list:
+        if isinstance(v, dict):
+            sheet = v.get("sheet") or v.get("sheet_name")
+            if sheet and not v.get("sheet_name"):
+                v["sheet_name"] = sheet
+            pb_type = v.get("power_bi_visual_type")
+            if isinstance(pb_type, dict):
+                pbt_str = pb_type.get("power_bi_visual_type")
+                if pbt_str and not v.get("type"):
+                    v["type"] = pbt_str
+            elif pb_type and not v.get("type"):
+                v["type"] = pb_type
+            elif v.get("qlik_type") and not v.get("type"):
+                v["type"] = v["qlik_type"]
 
     return res
 

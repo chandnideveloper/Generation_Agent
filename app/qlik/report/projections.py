@@ -14,8 +14,8 @@ def _names(items: Any) -> List[str]:
     resolved = []
     for item in as_list(items):
         if isinstance(item, dict):
-            name = text(item.get("name") or item.get("label") or item.get("title") or item.get("field_name"))
-            expr = text(item.get("expression") or item.get("qDef"))
+            name = text(item.get("field") or item.get("name") or item.get("label") or item.get("title") or item.get("field_name"))
+            expr = text(item.get("expression") or item.get("qDef") or item.get("qlik_formula") or item.get("dax_formula"))
             cand = name or expr
             if cand:
                 resolved.append(cand)

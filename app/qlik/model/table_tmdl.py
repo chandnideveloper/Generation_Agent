@@ -484,9 +484,18 @@ def _is_circular_self_reference(mquery_str: str, table_name: str) -> bool:
     return bool(re.search(pattern, mquery_str, re.MULTILINE | re.IGNORECASE))
 
 
+def _fix_table_navigation_target(mquery_str: str, table_name: str) -> str:
+    """If the mapping agent erroneously placed the database or generic name into the table navigation step,
+    correct the target table name to match the actual table being generated."""
+    if not mquery_str or not table_name:
+        return mquery_str
+    pattern = r'(\{\s*\[\s*Name\s*=\s*")[^"]+("\s*,\s*Kind\s*=\s*"Table"\s*\]\s*\})'
+    return re.sub(pattern, rf'\g<1>{table_name}\g<2>', mquery_str, flags=re.IGNORECASE)
+
+
 def _extract_mquery_from_payload(table: Dict[str, Any], table_name: str = "") -> Optional[str]:
     fabric = as_dict(table.get("fabric"))
-    t_name = table_name or text(table.get("name") or table.get("table_name"))
+    t_name = table_name or text(table.get("bi_table_name") or table.get("qlik_table_name") or table.get("name") or table.get("table_name"))
     candidates = [
         table.get("m_query"),
         table.get("mquery"),
@@ -501,7 +510,8 @@ def _extract_mquery_from_payload(table: Dict[str, Any], table_name: str = "") ->
         formatted = _format_m_steps(c)
         if formatted and not re.search(r"Table\.FromRows\(\s*\{\s*\}\s*,", formatted):
             if not _is_circular_self_reference(formatted, t_name):
-                return _fix_relative_folder_paths(formatted, table)
+                fixed = _fix_table_navigation_target(formatted, t_name)
+                return _fix_relative_folder_paths(fixed, table)
     return None
 
 

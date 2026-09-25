@@ -6,7 +6,7 @@ carries pre-computed pixels; those are trusted when present and recomputed
 otherwise.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.qlik.config import config
 from app.qlik.util.payload import as_dict, as_list
@@ -163,3 +163,144 @@ def _clamp(
     x = max(0, min(x, config.CANVAS_WIDTH - width))
     y = max(0, min(y, max(0, effective_height - height)))
     return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _get_pb_type(v: Dict[str, Any]) -> str:
+    pb = v.get("power_bi_visual_type")
+    if isinstance(pb, dict):
+        return str(pb.get("power_bi_visual_type") or "").strip().lower()
+    return str(pb or "").strip().lower()
+
+
+def _is_kpi_visual(v: Dict[str, Any]) -> bool:
+    qt = str(v.get("qlik_type") or "").strip().lower()
+    pbt = _get_pb_type(v)
+    if pbt in ("card", "kpi", "multirowcard"):
+        return True
+    if qt in ("kpi", "sn-kpi"):
+        return True
+    # Qlik auto-chart with only measures and no dimensions is a KPI card
+    if qt == "auto-chart":
+        cols = v.get("columns") or []
+        rows = v.get("rows") or []
+        if isinstance(cols, list) and len(cols) == 0 and isinstance(rows, list) and len(rows) > 0:
+            return True
+        if v.get("kpi_styling"):
+            return True
+    return False
+
+
+def _is_slicer_visual(v: Dict[str, Any]) -> bool:
+    qt = str(v.get("qlik_type") or "").strip().lower()
+    pbt = _get_pb_type(v)
+    return pbt in ("slicer",) or qt in ("filterpane", "sn-filterpane", "listbox", "variable-input", "variableinput")
+
+
+def compute_sheet_layout(
+    sheet_visuals: list,
+    grid: Tuple[float, float],
+    sheet_obj: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, int]], int]:
+    """Compute non-overlapping canvas bounds for all visuals on a sheet.
+
+    If visuals have explicit Qlik grid or pixel coordinates, preserves them.
+    If visuals are unpositioned, arranges them in an enterprise dashboard layout:
+    - KPIs / Metric Cards on top (horizontal row)
+    - Slicers / Filters below KPIs
+    - Charts / Tables below in a balanced 2-column or full-width grid
+    - Dynamically expands canvas height to fit all content cleanly without clipping.
+    """
+    import math
+
+    if not sheet_visuals:
+        return [], config.CANVAS_HEIGHT
+
+    # Check if ANY visual has explicit coordinates
+    def has_coords(v: Dict[str, Any]) -> bool:
+        lay = as_dict(v.get("layout")) or as_dict(as_dict(v.get("fabric")).get("layout"))
+        pos = as_dict(v.get("position"))
+        if lay.get("col") is not None and lay.get("row") is not None:
+            return True
+        if pos.get("col") is not None and pos.get("row") is not None:
+            return True
+        if lay.get("x") is not None and lay.get("y") is not None:
+            return True
+        if pos.get("x") is not None and pos.get("y") is not None:
+            return True
+        return False
+
+    explicit_count = sum(1 for v in sheet_visuals if has_coords(v))
+
+    if explicit_count > len(sheet_visuals) // 2:
+        # Most visuals have explicit coordinates: calculate bounds directly
+        columns, rows = grid
+        base_h = max(config.CANVAS_HEIGHT, int(round(rows * 60.0))) if rows > 12 else config.CANVAS_HEIGHT
+        prelim = [to_canvas(v, grid, i, canvas_height=base_h) for i, v in enumerate(sheet_visuals)]
+        max_bottom = max((p["y"] + p["height"] for p in prelim), default=base_h)
+        actual_h = max(base_h, max_bottom + 40)
+        final_rects = [to_canvas(v, grid, i, canvas_height=actual_h) for i, v in enumerate(sheet_visuals)]
+        return final_rects, actual_h
+
+    # Otherwise, arrange intelligently without overlap
+    CANVAS_WIDTH = config.CANVAS_WIDTH
+    MIN_HEIGHT = config.CANVAS_HEIGHT
+    margin = 16
+    gap = 16
+    content_w = CANVAS_WIDTH - 2 * margin
+
+    kpis = [v for v in sheet_visuals if _is_kpi_visual(v)]
+    slicers = [v for v in sheet_visuals if _is_slicer_visual(v)]
+    charts = [v for v in sheet_visuals if not _is_kpi_visual(v) and not _is_slicer_visual(v)]
+
+    positions: Dict[int, Dict[str, int]] = {}
+    cur_y = margin
+
+    # 1. KPIs on top
+    if kpis:
+        num_kpis = len(kpis)
+        cols = num_kpis if num_kpis <= 5 else (4 if num_kpis <= 8 else 5)
+        kpi_w = (content_w - (cols - 1) * gap) // cols
+        kpi_h = 105
+        for i, k in enumerate(kpis):
+            r = i // cols
+            c = i % cols
+            x = margin + c * (kpi_w + gap)
+            y = cur_y + r * (kpi_h + gap)
+            positions[id(k)] = {"x": int(x), "y": int(y), "width": int(kpi_w), "height": int(kpi_h)}
+        num_rows = math.ceil(num_kpis / cols)
+        cur_y += num_rows * (kpi_h + gap)
+
+    # 2. Slicers / Filters below KPIs
+    if slicers:
+        num_slicers = len(slicers)
+        cols = num_slicers if num_slicers <= 4 else 3
+        sl_w = (content_w - (cols - 1) * gap) // cols
+        sl_h = 80
+        for i, s in enumerate(slicers):
+            r = i // cols
+            c = i % cols
+            x = margin + c * (sl_w + gap)
+            y = cur_y + r * (sl_h + gap)
+            positions[id(s)] = {"x": int(x), "y": int(y), "width": int(sl_w), "height": int(sl_h)}
+        num_rows = math.ceil(num_slicers / cols)
+        cur_y += num_rows * (sl_h + gap)
+
+    # 3. Charts & Visualizations below
+    if charts:
+        num_charts = len(charts)
+        ch_w = (content_w - gap) // 2
+        ch_h = 320
+        for i, ch in enumerate(charts):
+            r = i // 2
+            c = i % 2
+            is_lone_last = (i == num_charts - 1 and c == 0)
+            actual_w = content_w if is_lone_last else ch_w
+            x = margin if c == 0 else (margin + ch_w + gap)
+            y = cur_y + r * (ch_h + gap)
+            positions[id(ch)] = {"x": int(x), "y": int(y), "width": int(actual_w), "height": int(ch_h)}
+        num_rows = math.ceil(num_charts / 2)
+        cur_y += num_rows * (ch_h + gap)
+
+    page_height = max(MIN_HEIGHT, cur_y + margin)
+    result_rects = [positions.get(id(v), {"x": margin, "y": margin, "width": 400, "height": 300}) for v in sheet_visuals]
+    return result_rects, page_height

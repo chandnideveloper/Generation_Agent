@@ -19,11 +19,21 @@ ORPHAN_TABLE = "_Measures"
 def _home_table(item: Dict[str, Any], known: List[str]) -> str:
     """Where the measure should live."""
     fabric = as_dict(item.get("fabric"))
-    candidates = [fabric.get("table"), item.get("table"), *as_list(item.get("tables"))]
+    candidates = [
+        fabric.get("table"),
+        item.get("table"),
+        item.get("table_name"),
+        item.get("target_table"),
+        *as_list(item.get("tables")),
+    ]
+    known_lower_map = {k.lower(): k for k in known if k}
     for candidate in candidates:
         name = text(candidate)
-        if name and name in known:
-            return name
+        if name:
+            if name in known:
+                return name
+            if name.lower() in known_lower_map:
+                return known_lower_map[name.lower()]
     # A measure whose table we cannot place still belongs in the model.
     return ORPHAN_TABLE
 
@@ -262,6 +272,7 @@ def build_measure(
     raw = text(
         fabric.get("dax_expression")
         or measure.get("dax_expression")
+        or measure.get("dax_formula")
         or measure.get("dax")
         or measure.get("target_expression"),
         "BLANK()",
@@ -270,7 +281,13 @@ def build_measure(
     fmt = _resolve_format_string(raw_fmt)
 
     cleaned_raw = _clean_dax(raw)
-    home_tbl = text(fabric.get("table") or (measure.get("tables") or [""])[0] or "_Measures")
+    home_tbl = text(
+        measure.get("table_name")
+        or measure.get("table")
+        or fabric.get("table")
+        or (measure.get("tables") or [""])[0]
+        or "_Measures"
+    )
     repaired_raw = _repair_dax_columns(cleaned_raw, home_tbl, valid_columns)
     dax, problem = guard(name, repaired_raw, home_table=home_tbl)
     lines: List[str] = []

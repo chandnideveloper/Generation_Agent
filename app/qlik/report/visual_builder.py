@@ -57,14 +57,21 @@ def _resolve_title(source: Dict[str, Any], visual: Dict[str, Any], qlik_type: st
     """Extract human-readable visual title from mapping payload."""
     formatting = as_dict(source.get("formatting"))
     fabric = as_dict(visual.get("fabric"))
+    pbi = as_dict(visual.get("power_bi_visual_type"))
     candidates = [
-        formatting.get("title"),
-        fabric.get("title"),
-        source.get("title"),
+        visual.get("visual_title"),
         visual.get("title"),
         visual.get("name"),
+        formatting.get("title"),
+        fabric.get("title"),
+        source.get("visual_title"),
+        source.get("title"),
+        source.get("name"),
+        pbi.get("title"),
     ]
     for c in candidates:
+        if isinstance(c, dict):
+            c = c.get("text") or c.get("title")
         if c and isinstance(c, str) and c.strip() and c.strip().lower() != "visualizations item":
             return c.strip()
     return qlik_type.replace("-", " ").replace("sn-", "").title()
@@ -110,14 +117,25 @@ def _match_field(
     measure_home: Dict[str, str],
     column_home: Dict[str, str],
     field_resolver: Optional[Dict[str, Tuple[str, str]]] = None,
+    formula_to_measure: Optional[Dict[str, Tuple[str, str, bool]]] = None,
 ) -> Optional[Tuple[str, str, bool]]:
     """Returns (entity, property, is_measure) if found, else None."""
     if not name:
         return None
-    clean = name.strip()
+    clean = str(name).strip()
     c_lower = clean.lower()
+    fnorm = re.sub(r"\s+", " ", clean).strip().lower()
     base = _extract_base_field(clean)
     b_lower = base.lower()
+
+    # -1. Check formula_to_measure (exact or whitespace-normalized)
+    if formula_to_measure:
+        if fnorm in formula_to_measure:
+            return formula_to_measure[fnorm]
+        if c_lower in formula_to_measure:
+            return formula_to_measure[c_lower]
+        if b_lower in formula_to_measure:
+            return formula_to_measure[b_lower]
 
     # 0. Dot notation e.g. Doctors.DEPARTMENT or BILLS.PATIENT_ID or [APPOINTMENTS].[PATIENT_ID]
     if "." in clean:
@@ -141,12 +159,12 @@ def _match_field(
     if clean in measure_home:
         return (measure_home[clean], clean, True)
     for m in measure_home:
-        if m.lower() in (c_lower, b_lower):
+        if m.lower() in (c_lower, b_lower, fnorm):
             return (measure_home[m], m, True)
 
     # 2. Exact or base in field_resolver
     if field_resolver:
-        for k in (c_lower, b_lower, c_lower.replace("_", " "), b_lower.replace("_", " "), c_lower.replace(" ", "_"), b_lower.replace(" ", "_")):
+        for k in (c_lower, b_lower, fnorm, c_lower.replace("_", " "), b_lower.replace("_", " "), c_lower.replace(" ", "_"), b_lower.replace(" ", "_")):
             if k in field_resolver:
                 ent, prop = field_resolver[k]
                 return (ent, prop, False)
@@ -157,7 +175,7 @@ def _match_field(
     if base in column_home:
         return (column_home[base], base, False)
     for col in column_home:
-        if col.lower() in (c_lower, b_lower, c_lower.replace("_", " "), b_lower.replace("_", " "), c_lower.replace(" ", "_"), b_lower.replace(" ", "_")):
+        if col.lower() in (c_lower, b_lower, fnorm, c_lower.replace("_", " "), b_lower.replace("_", " "), c_lower.replace(" ", "_"), b_lower.replace(" ", "_")):
             return (column_home[col], col, False)
 
     # 4. Fuzzy match against measures (case-insensitive, handles typos like "Revneue" -> "Revenue")
@@ -188,6 +206,15 @@ def _match_field(
             ent, prop = col_map[close_cols[0]]
             return (ent, prop, False)
 
+    # 6. Check regex aggregation on known column
+    if base and base != clean:
+        base_match = _match_field(base, measure_home, column_home, field_resolver, formula_to_measure)
+        if base_match:
+            ent, prop, _ = base_match
+            return (ent, prop, True)
+
+    return None
+
 def _parse_font_size(size_obj: Any) -> Optional[float]:
     """Parse font size from float, int, str ('14pt', '14px', '14', 'M'), or dict ({'fixed': '14'})."""
     if not size_obj:
@@ -215,10 +242,13 @@ def build_visual(
     measure_home: Dict[str, str],
     column_home: Dict[str, str],
     field_resolver: Optional[Dict[str, Tuple[str, str]]] = None,
+    formula_to_measure: Optional[Dict[str, Tuple[str, str, bool]]] = None,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Dict[str, int]]:
     """Return (visual.json, note-or-None, stats)."""
     source = _source(visual)
     fabric = as_dict(visual.get("fabric"))
+    pbi_type_obj = visual.get("power_bi_visual_type") or source.get("power_bi_visual_type")
+    pbi_dict = as_dict(pbi_type_obj)
 
     qlik_type = text(
         source.get("chart_type")
@@ -231,54 +261,107 @@ def build_visual(
     )
     is_extension = bool(source.get("is_extension") or "ext" in qlik_type.lower())
 
-    # Prioritize explicit visual_type specified in fabric mapping, otherwise
-    # resolve from catalog. But an explicit type is only trustworthy when it
-    # doesn't require an AppSource custom visual this pipeline never
-    # registers (see CUSTOM_VISUAL_ONLY_TYPES) - mapping stages emit
-    # "boxPlot"/"sankeyDiagram" as if they were ordinary native types, which
-    # produces Fabric's "add this custom visual first" placeholder instead of
-    # a chart. In that case, defer to the catalog's own safe substitution
-    # (e.g. boxplot -> columnChart) instead of trusting the literal value.
+    # Candidate field collections across all format variants
+    ax_map = as_dict(pbi_dict.get("axis_mapping"))
+    combo_cat = text(ax_map.get("category"))
+    combo_col_meas = _names(ax_map.get("column_values")) or _names(pbi_dict.get("column_measures"))
+    combo_line_meas = _names(ax_map.get("line_values")) or _names(pbi_dict.get("line_measures"))
+
+    raw_dims_input = (
+        _names(source.get("dimensions"))
+        + _names(source.get("x_axis"))
+        + _names(fabric.get("x_axis_fields"))
+        + _names(visual.get("x_axis"))
+        + _names(visual.get("dimensions"))
+        + _names(visual.get("columns"))
+        + _names(source.get("columns"))
+        + _names(pbi_dict.get("columns"))
+        + _names(visual.get("slicers"))
+    )
+    if combo_cat and combo_cat not in raw_dims_input:
+        raw_dims_input.insert(0, combo_cat)
+
+    raw_meas_input = (
+        _names(source.get("measures"))
+        + _names(source.get("y_axis"))
+        + _names(fabric.get("y_axis_fields"))
+        + _names(visual.get("y_axis"))
+        + _names(visual.get("measures"))
+        + _names(visual.get("rows"))
+        + _names(source.get("rows"))
+        + _names(pbi_dict.get("rows"))
+        + combo_col_meas
+        + combo_line_meas
+    )
+
+    dimensions: List[str] = []
+    measures: List[str] = []
+
+    # Disambiguate dimensions and measures using model matching
+    for d in raw_dims_input:
+        d_clean = str(d).strip()
+        if not d_clean:
+            continue
+        parts = [p.strip() for p in re.split(r" -> | > ", d_clean) if p.strip()] if (" -> " in d_clean or " > " in d_clean) else [d_clean]
+        for part in parts:
+            m_res = _match_field(part, measure_home, column_home, field_resolver, formula_to_measure)
+            if m_res and m_res[2]:
+                if part not in measures:
+                    measures.append(part)
+            else:
+                if part not in dimensions:
+                    dimensions.append(part)
+
+    for m in raw_meas_input:
+        m_clean = str(m).strip()
+        if not m_clean:
+            continue
+        m_res = _match_field(m_clean, measure_home, column_home, field_resolver, formula_to_measure)
+        if m_res and not m_res[2]:
+            if m_clean not in dimensions:
+                dimensions.append(m_clean)
+        else:
+            if m_clean not in measures:
+                measures.append(m_clean)
+
+    num_dims = len(dimensions)
+    num_meas = len(measures)
+
+    # Prioritize explicit visual_type or power_bi_visual_type specified in mapping,
+    # otherwise resolve from catalog.
     explicit_visual_type = text(fabric.get("visual_type"))
     requires_custom_visual = bool(fabric.get("requires_custom_visual")) or (
         explicit_visual_type in visual_catalog.CUSTOM_VISUAL_ONLY_TYPES
     )
-    if explicit_visual_type and not requires_custom_visual:
+
+    resolved_tuple = None
+    if pbi_type_obj:
+        resolved_tuple = visual_catalog.resolve_pbi_type(pbi_type_obj, qlik_type=qlik_type, num_dims=num_dims, num_meas=num_meas)
+
+    if resolved_tuple:
+        visual_type, severity, reason, suggestion = resolved_tuple
+    elif explicit_visual_type and not requires_custom_visual:
         visual_type = explicit_visual_type
         severity, reason, suggestion = "native", None, None
     else:
-        visual_type, severity, reason, suggestion = visual_catalog.resolve(qlik_type, is_extension)
+        visual_type, severity, reason, suggestion = visual_catalog.resolve(qlik_type, is_extension, num_dims=num_dims, num_meas=num_meas)
 
     title = _resolve_title(source, visual, qlik_type)
-    object_id = text(source.get("qlik_name") or source.get("id") or visual.get("object_id"))
+    object_id = text(source.get("qlik_name") or source.get("id") or visual.get("object_id") or visual.get("sheet_id"))
+
+    # Fallback to visual title for single-metric cards or single-dim slicers if fields were empty
+    if visual_type == "card" and not measures:
+        m_title = _match_field(title, measure_home, column_home, field_resolver, formula_to_measure)
+        if m_title and m_title[2]:
+            measures.append(title)
+    if visual_type == "slicer" and not dimensions:
+        d_title = _match_field(title, measure_home, column_home, field_resolver, formula_to_measure)
+        if d_title and not d_title[2]:
+            dimensions.append(title)
 
     category_role, value_role = ROLES.get(visual_type, DEFAULT_ROLES)
     projections: Dict[str, List[Dict[str, Any]]] = {}
     unbound: List[str] = []
-
-    raw_dims = _names(
-        source.get("dimensions")
-        or source.get("x_axis")
-        or fabric.get("x_axis_fields")
-        or visual.get("x_axis")
-        or visual.get("dimensions")
-    )
-    dimensions = []
-    for d in raw_dims:
-        if " -> " in d:
-            dimensions.extend([p.strip() for p in d.split(" -> ") if p.strip()])
-        elif " > " in d:
-            dimensions.extend([p.strip() for p in d.split(" > ") if p.strip()])
-        else:
-            dimensions.append(d)
-
-    measures = _names(
-        source.get("measures")
-        or source.get("y_axis")
-        or fabric.get("y_axis_fields")
-        or visual.get("y_axis")
-        or visual.get("measures")
-    )
 
     # Check if explicit field_roles were produced by the mapping agent / LLM
     explicit_field_roles = as_list(fabric.get("field_roles") or visual.get("field_roles"))
@@ -299,9 +382,9 @@ def build_visual(
 
             # Validate whether (ent, prop) is consistent with the model
             lookup_key = (prop or field_name).strip()
-            matched = _match_field(lookup_key, measure_home, column_home, field_resolver)
+            matched = _match_field(lookup_key, measure_home, column_home, field_resolver, formula_to_measure)
             if not matched and field_name and field_name != lookup_key:
-                matched = _match_field(field_name, measure_home, column_home, field_resolver)
+                matched = _match_field(field_name, measure_home, column_home, field_resolver, formula_to_measure)
 
             if matched:
                 ent, prop, is_meas_resolved = matched
@@ -347,29 +430,87 @@ def build_visual(
             elif field_name:
                 unbound.append(field_name)
 
-    # Fallback to deterministic/heuristic field resolution if explicit roles not present
+    # Fallback to schema-based field resolution if explicit roles not present
     if not projections:
-        if category_role:
-            bucket = []
-            for index, field in enumerate(dimensions):
-                field_clean = field.strip()
-                match = _match_field(field_clean, measure_home, column_home, field_resolver)
+        if visual_type == "card":
+            card_bucket = []
+            for f in measures or dimensions:
+                match = _match_field(f, measure_home, column_home, field_resolver, formula_to_measure)
                 if match:
                     ent, prop, is_meas = match
-                    proj = _measure_projection(ent, prop) if is_meas else _projection(ent, prop, index)
-                    bucket.append(proj)
+                    card_bucket.append(_measure_projection(ent, prop) if is_meas else _aggregation_projection(ent, prop, 0, 0))
+                    break
                 else:
-                    unbound.append(field_clean)
-            if not bucket and visual_type == "slicer" and qlik_type in ("qlik-variable-input", "variable-input", "variableinput", "variable"):
-                # Variable input slicer bound to dynamic Parameters table
-                bucket.append(_projection("Parameters", "Label", 0))
-            if bucket:
-                projections[category_role] = bucket
+                    unbound.append(f)
+            if not card_bucket and title:
+                match = _match_field(title, measure_home, column_home, field_resolver, formula_to_measure)
+                if match:
+                    ent, prop, is_meas = match
+                    card_bucket.append(_measure_projection(ent, prop) if is_meas else _aggregation_projection(ent, prop, 0, 0))
+            if card_bucket:
+                projections["Values"] = card_bucket
 
-        # ── scatterChart: X / Y / Size / Category ────────────────────────────────
-        if visual_type == "scatterChart":
+        elif visual_type == "slicer":
+            slicer_bucket = []
+            for f in dimensions or measures:
+                match = _match_field(f, measure_home, column_home, field_resolver, formula_to_measure)
+                if match:
+                    ent, prop, is_meas = match
+                    slicer_bucket.append(_measure_projection(ent, prop) if is_meas else _projection(ent, prop, 0))
+                    break
+                else:
+                    unbound.append(f)
+            if not slicer_bucket and title:
+                match = _match_field(title, measure_home, column_home, field_resolver, formula_to_measure)
+                if match:
+                    ent, prop, is_meas = match
+                    slicer_bucket.append(_measure_projection(ent, prop) if is_meas else _projection(ent, prop, 0))
+            if not slicer_bucket and qlik_type in ("qlik-variable-input", "variable-input", "variableinput", "variable"):
+                slicer_bucket.append(_projection("Parameters", "Label", 0))
+            if slicer_bucket:
+                projections["Values"] = slicer_bucket
+
+        elif visual_type == "lineClusteredColumnComboChart":
+            cat_bucket = []
+            for index, field in enumerate(dimensions):
+                match = _match_field(field, measure_home, column_home, field_resolver, formula_to_measure)
+                if match:
+                    ent, prop, is_meas = match
+                    cat_bucket.append(_measure_projection(ent, prop) if is_meas else _projection(ent, prop, index))
+                    break
+                else:
+                    unbound.append(field)
+            if cat_bucket:
+                projections["Category"] = cat_bucket
+
+            col_m_list = combo_col_meas if combo_col_meas else (measures[:1] if measures else [])
+            line_m_list = combo_line_meas if combo_line_meas else (measures[1:] if len(measures) > 1 else [])
+
+            y_bucket = []
+            for cm in col_m_list:
+                match = _match_field(cm, measure_home, column_home, field_resolver, formula_to_measure)
+                if match:
+                    ent, prop, is_m = match
+                    y_bucket.append(_measure_projection(ent, prop) if is_m else _aggregation_projection(ent, prop, len(y_bucket), 0))
+                else:
+                    unbound.append(cm)
+            if y_bucket:
+                projections["Y"] = y_bucket
+
+            y2_bucket = []
+            for lm in line_m_list:
+                match = _match_field(lm, measure_home, column_home, field_resolver, formula_to_measure)
+                if match:
+                    ent, prop, is_m = match
+                    y2_bucket.append(_measure_projection(ent, prop) if is_m else _aggregation_projection(ent, prop, len(y2_bucket), 0))
+                else:
+                    unbound.append(lm)
+            if y2_bucket:
+                projections["Y2"] = y2_bucket
+
+        elif visual_type == "scatterChart":
             def _resolve_scatter_field(name: str, idx: int, use_agg: bool):
-                match = _match_field(name, measure_home, column_home, field_resolver)
+                match = _match_field(name, measure_home, column_home, field_resolver, formula_to_measure)
                 if match:
                     ent, prop, is_meas = match
                     if is_meas:
@@ -378,7 +519,6 @@ def build_visual(
                 unbound.append(name.strip())
                 return None
 
-            # dimensions → Category / Details (the category grouping)
             cat_bucket = []
             for i, d in enumerate(dimensions):
                 p = _resolve_scatter_field(d, i, False)
@@ -387,7 +527,6 @@ def build_visual(
             if cat_bucket:
                 projections["Category"] = cat_bucket
 
-            # measures[0] → X Axis, measures[1] → Y Axis, measures[2] → Size
             x_fields = measures[:1]
             y_fields = measures[1:2]
             z_fields = measures[2:3]
@@ -416,36 +555,43 @@ def build_visual(
             if size_bucket:
                 projections["Size"] = size_bucket
 
-        elif value_role:
-            bucket = []
-            is_chart_value = visual_type not in ("tableEx", "pivotTable", "slicer") and value_role in ("Y", "Values", "Size")
-            for field in measures:
-                field_clean = field.strip()
-                match = _match_field(field_clean, measure_home, column_home, field_resolver)
-                if match:
-                    ent, prop, is_meas = match
-                    if is_meas:
-                        bucket.append(_measure_projection(ent, prop))
-                    else:
-                        proj = _aggregation_projection(ent, prop, len(bucket), 0) if is_chart_value else _projection(ent, prop, len(bucket))
+        else:
+            if category_role:
+                bucket = []
+                for index, field in enumerate(dimensions):
+                    field_clean = field.strip()
+                    match = _match_field(field_clean, measure_home, column_home, field_resolver, formula_to_measure)
+                    if match:
+                        ent, prop, is_meas = match
+                        proj = _measure_projection(ent, prop) if is_meas else _projection(ent, prop, index)
                         bucket.append(proj)
-                else:
-                    unbound.append(field_clean)
+                    else:
+                        unbound.append(field_clean)
+                if bucket:
+                    projections[category_role] = bucket
 
-            if visual_type == "tableEx":
-                # tableEx: dimensions already in Values from category_role; add measures separately
-                meas_bucket = [p for p in bucket]
-                if meas_bucket:
-                    projections.setdefault("Values", []).extend(meas_bucket)
-            elif visual_type == "lineClusteredColumnComboChart" and len(bucket) > 1:
-                # Combo chart: first measure → Y (bars), rest → Y2 (line)
-                projections["Y"] = [bucket[0]]
-                projections["Y2"] = bucket[1:]
-            elif bucket:
-                projections.setdefault(value_role, []).extend(bucket)
+            if value_role:
+                bucket = []
+                is_chart_value = visual_type not in ("tableEx", "pivotTable", "slicer") and value_role in ("Y", "Values", "Size")
+                for field in measures:
+                    field_clean = field.strip()
+                    match = _match_field(field_clean, measure_home, column_home, field_resolver, formula_to_measure)
+                    if match:
+                        ent, prop, is_meas = match
+                        if is_meas:
+                            bucket.append(_measure_projection(ent, prop))
+                        else:
+                            proj = _aggregation_projection(ent, prop, len(bucket), 0) if is_chart_value else _projection(ent, prop, len(bucket))
+                            bucket.append(proj)
+                    else:
+                        unbound.append(field_clean)
 
-    if not projections and visual_type == "slicer" and qlik_type in ("qlik-variable-input", "variable-input", "variableinput", "variable"):
-        projections.setdefault("Values", []).append(_projection("Parameters", "Label", 0))
+                if visual_type == "tableEx":
+                    meas_bucket = [p for p in bucket]
+                    if meas_bucket:
+                        projections.setdefault("Values", []).extend(meas_bucket)
+                elif bucket:
+                    projections.setdefault(value_role, []).extend(bucket)
 
     name = object_id or lineage_tag(f"visual:{title}:{z_index}")[:8]
 
