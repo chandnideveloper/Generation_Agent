@@ -1044,7 +1044,8 @@ class TmdlGenerator:
 
             elif conn_type == 'snowflake':
                 schema = raw_schema if raw_schema else "PUBLIC"
-                m_lines.append(f"    Source = Snowflake.Databases(\"{server}\", \"\"),")
+                warehouse = connection_info.get("warehouse") or "COMPUTE_WH"
+                m_lines.append(f"    Source = Snowflake.Databases(\"{server}\", \"{warehouse}\"),")
                 m_lines.append(f"    Database = Source{{[Name=\"{database}\",Kind=\"Database\"]}}[Data],")
                 m_lines.append(f"    Schema = Database{{[Name=\"{schema}\",Kind=\"Schema\"]}}[Data],")
                 

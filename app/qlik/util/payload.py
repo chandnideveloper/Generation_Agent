@@ -67,10 +67,52 @@ def unwrap_mapping(document: Any) -> Dict[str, Any]:
                         col_dict["name"] = col_name
                     cols_by_table.setdefault(tbl, []).append(col_dict)
 
+    # Map datasources/connections to extract connection details and warehouse
+    ds_map: Dict[str, Any] = {}
+    default_snowflake_wh = None
+    for ds in as_list(res.get("datasources")):
+        if isinstance(ds, dict):
+            ds_id = ds.get("id")
+            for c in as_list(ds.get("connections")):
+                if isinstance(c, dict):
+                    if ds_id and ds_id not in ds_map:
+                        ds_map[ds_id] = c
+                    wh = c.get("warehouse")
+                    if wh and (str(c.get("type", "")).lower() == "snowflake" or str(ds.get("connection_type", "")).lower() == "snowflake"):
+                        default_snowflake_wh = wh
+
+    for c in as_list(res.get("connections")):
+        if isinstance(c, dict):
+            c_id = c.get("connection_id") or c.get("id")
+            if c_id and c_id not in ds_map:
+                ds_map[c_id] = c
+            wh = c.get("warehouse")
+            if wh and str(c.get("driver", "")).lower() == "snowflake":
+                default_snowflake_wh = default_snowflake_wh or wh
+
+    cd = as_dict(res.get("connection_details"))
+    if cd.get("warehouse"):
+        default_snowflake_wh = default_snowflake_wh or cd.get("warehouse")
+    if not default_snowflake_wh:
+        default_snowflake_wh = "COMPUTE_WH"
+
     tbls = res.get("tables")
     if isinstance(tbls, list):
         for t in tbls:
             if isinstance(t, dict):
+                ds_id = t.get("datasource_id") or t.get("connection_id")
+                matched_conn = dict(ds_map.get(ds_id, {})) if ds_id and ds_id in ds_map else {}
+                existing_conn = as_dict(t.get("connection"))
+                for k, v in existing_conn.items():
+                    if v:
+                        matched_conn[k] = v
+                wh = matched_conn.get("warehouse") or t.get("warehouse") or default_snowflake_wh
+                if wh:
+                    matched_conn["warehouse"] = wh
+                    t["warehouse"] = wh
+                if matched_conn:
+                    t["connection"] = matched_conn
+
                 t_name = str(
                     t.get("bi_table_name")
                     or t.get("fabric_table_name")

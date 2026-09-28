@@ -485,12 +485,52 @@ def _is_circular_self_reference(mquery_str: str, table_name: str) -> bool:
 
 
 def _fix_table_navigation_target(mquery_str: str, table_name: str) -> str:
-    """If the mapping agent erroneously placed the database or generic name into the table navigation step,
+    """If the mapping agent placed the database or another table into the table navigation step,
     correct the target table name to match the actual table being generated."""
     if not mquery_str or not table_name:
         return mquery_str
-    pattern = r'(\{\s*\[\s*Name\s*=\s*")[^"]+("\s*,\s*Kind\s*=\s*"Table"\s*\]\s*\})'
-    return re.sub(pattern, rf'\g<1>{table_name}\g<2>', mquery_str, flags=re.IGNORECASE)
+
+    clean_tn = table_name.strip().strip('"').strip("'")
+    if not clean_tn:
+        return mquery_str
+
+    # 1. Matches {[Name = "old_name", Kind = "Table"]} (with any spacing or casing)
+    p1 = r'(\{\s*\[\s*Name\s*=\s*")[^"]+("\s*,\s*Kind\s*=\s*"Table"\s*\]\s*\})'
+    mquery_str = re.sub(p1, rf'\g<1>{clean_tn}\g<2>', mquery_str, flags=re.IGNORECASE)
+
+    # 2. Matches {[Kind = "Table", Name = "old_name"]} (with any spacing or casing)
+    p2 = r'(\{\s*\[\s*Kind\s*=\s*"Table"\s*,\s*Name\s*=\s*")[^"]+("\s*\]\s*\})'
+    mquery_str = re.sub(p2, rf'\g<1>{clean_tn}\g<2>', mquery_str, flags=re.IGNORECASE)
+
+    # 3. Matches {[Schema = "...", Item = "old_name"]} (SQL Server/Synapse)
+    p3 = r'(\{\s*\[\s*(?:Schema\s*=\s*"[^"]+"\s*,\s*)?Item\s*=\s*")[^"]+("\s*\]\s*\})'
+    mquery_str = re.sub(p3, rf'\g<1>{clean_tn}\g<2>', mquery_str, flags=re.IGNORECASE)
+
+    return mquery_str
+
+
+def _fix_snowflake_warehouse(mquery: str, warehouse: str) -> str:
+    """Ensure the Snowflake connection expression has a valid warehouse name instead of null or empty string."""
+    if not mquery or not warehouse or "Snowflake.Databases" not in mquery:
+        return mquery
+
+    wh_clean = str(warehouse).strip().strip('"').strip("'")
+    if not wh_clean:
+        return mquery
+
+    # 1. Matches Snowflake.Databases("server", null or "" or '') with optional trailing args
+    p1 = r'(Snowflake\.Databases\s*\(\s*"[^"]+"\s*,\s*)(?:null|""|\'\')'
+    mquery = re.sub(p1, rf'\g<1>"{wh_clean}"', mquery, flags=re.IGNORECASE)
+
+    # 2. Matches Snowflake.Databases("server", [options]) -> Snowflake.Databases("server", "wh", [options])
+    p2 = r'(Snowflake\.Databases\s*\(\s*"[^"]+"\s*),\s*(\[)'
+    mquery = re.sub(p2, rf'\g<1>, "{wh_clean}", \g<2>', mquery, flags=re.IGNORECASE)
+
+    # 3. Matches Snowflake.Databases("server") without second arg -> Snowflake.Databases("server", "wh")
+    p3 = r'(Snowflake\.Databases\s*\(\s*"[^"]+"\s*)\)'
+    mquery = re.sub(p3, rf'\g<1>, "{wh_clean}")', mquery, flags=re.IGNORECASE)
+
+    return mquery
 
 
 def _extract_mquery_from_payload(table: Dict[str, Any], table_name: str = "") -> Optional[str]:
@@ -504,6 +544,14 @@ def _extract_mquery_from_payload(table: Dict[str, Any], table_name: str = "") ->
         table.get("power_query"),
         fabric.get("power_query"),
     ]
+    warehouse = (
+        table.get("warehouse")
+        or (table.get("connection") or {}).get("warehouse")
+        or (table.get("connection_details") or {}).get("warehouse")
+        or os.getenv("DEFAULT_WAREHOUSE")
+        or os.getenv("SNOWFLAKE_WAREHOUSE")
+        or "COMPUTE_WH"
+    )
     for c in candidates:
         if not c:
             continue
@@ -511,6 +559,7 @@ def _extract_mquery_from_payload(table: Dict[str, Any], table_name: str = "") ->
         if formatted and not re.search(r"Table\.FromRows\(\s*\{\s*\}\s*,", formatted):
             if not _is_circular_self_reference(formatted, t_name):
                 fixed = _fix_table_navigation_target(formatted, t_name)
+                fixed = _fix_snowflake_warehouse(fixed, warehouse)
                 return _fix_relative_folder_paths(fixed, table)
     return None
 
@@ -649,7 +698,7 @@ def _mquery(
     port = text(conn.get("port"))
     database = text(conn.get("database") or conn.get("db"))
     schema = text(conn.get("schema") or table.get("schema"))
-    warehouse = text(conn.get("warehouse") or conn.get("wh") or os.getenv("SNOWFLAKE_WAREHOUSE") or os.getenv("DEFAULT_WAREHOUSE"))
+    warehouse = text(conn.get("warehouse") or conn.get("wh") or table.get("warehouse") or os.getenv("SNOWFLAKE_WAREHOUSE") or os.getenv("DEFAULT_WAREHOUSE") or "COMPUTE_WH")
 
     if not server:
         server = (
@@ -660,7 +709,7 @@ def _mquery(
             or ""
         )
 
-    if (warehouse or "snowflake" in str(conn).lower()) and driver in ("generic", "database", ""):
+    if (warehouse or "snowflake" in str(conn).lower() or "snowflake" in str(table).lower()) and driver in ("generic", "database", ""):
         driver = "snowflake"
 
     extracted_table = None
