@@ -85,6 +85,8 @@ def _entity_maps(mapping: Dict[str, Any]):
                 or as_dict(column).get("qlik_column_name")
                 or as_dict(column).get("name")
             )
+            if column_name and "." in column_name:
+                column_name = column_name.split(".")[-1].strip()
             if column_name:
                 if column_name not in column_home:
                     column_home[column_name] = table_name

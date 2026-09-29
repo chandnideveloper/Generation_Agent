@@ -34,13 +34,17 @@ def _clean_sql_identifier(token: str) -> str:
 
 
 def _column_name(column: Dict[str, Any]) -> str:
-    return text(
-        column.get("fabric_column_name")
+    name = text(
+        column.get("bi_column_name")
+        or column.get("fabric_column_name")
         or column.get("qlik_column_name")
         or column.get("name")
         or column.get("Name"),
         "Column",
     )
+    if "." in name:
+        name = name.split(".")[-1].strip()
+    return name
 
 
 def _is_calculated(

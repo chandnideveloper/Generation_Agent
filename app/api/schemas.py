@@ -10,10 +10,10 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class GitHubTargetConfig(BaseModel):
-    owner: str = Field(..., min_length=1, description="GitHub user or organization name")
-    repo_name: str = Field(..., min_length=1, description="GitHub repository name")
+    owner: str = Field(default="", description="GitHub user or organization name")
+    repo_name: str = Field(default="", description="GitHub repository name")
     branch: str = Field(default="main", min_length=1, description="Target branch")
-    git_pat: str = Field(..., min_length=1, description="GitHub Personal Access Token")
+    git_pat: str = Field(default="", description="GitHub Personal Access Token")
     directory: Optional[str] = Field(
         default_factory=lambda: os.getenv("DESTINATION_BASE", "test-workspace"),
         description="Target repository subfolder (e.g. 'test-workspace') synchronized with Fabric",
@@ -22,6 +22,33 @@ class GitHubTargetConfig(BaseModel):
         default=None,
         description="Alias for directory (e.g. 'test-workspace')",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_github_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # normalize owner / org
+            if not data.get("owner"):
+                data["owner"] = data.get("org") or data.get("organization") or os.getenv("GITHUB_ORG", "chandnideveloper")
+            # normalize repo / repo_name
+            if not data.get("repo_name"):
+                data["repo_name"] = data.get("repo") or data.get("repository") or os.getenv("GITHUB_REPO", "tmdl")
+            # normalize git_pat
+            if not data.get("git_pat"):
+                data["git_pat"] = (
+                    data.get("pat")
+                    or data.get("token")
+                    or data.get("github_pat")
+                    or data.get("git_token")
+                    or os.getenv("GIT_PAT")
+                    or os.getenv("GITHUB_PAT")
+                    or os.getenv("GITHUB_TOKEN")
+                    or ""
+                )
+            # normalize directory
+            if not data.get("directory"):
+                data["directory"] = data.get("destination_base") or data.get("folder") or os.getenv("DESTINATION_BASE", "test-workspace")
+        return data
 
     @property
     def target_directory(self) -> str:
