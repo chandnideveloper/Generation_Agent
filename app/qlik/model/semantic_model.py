@@ -1,3 +1,4 @@
+
 """Assemble the complete semantic model folder from a mapping payload.
 
 Produces the file map for `<name>.SemanticModel/`:
@@ -111,15 +112,50 @@ def build_semantic_model(
         name = _clean_table_name(raw_name)
         if name not in table_files:
             continue
+        # Table-level primary key definitions
+        table_pks = (
+            as_list(table.get("primary_key"))
+            or as_list(table.get("primary_keys"))
+            or as_list(table.get("primaryKey"))
+            or as_list(table.get("primaryKeys"))
+            or as_list(table.get("keys"))
+            or as_list(table.get("key_columns"))
+            or as_list(table.get("keyColumns"))
+        )
+        for pk in table_pks:
+            pk_name = text(pk.get("name") or pk.get("column_name") if isinstance(pk, dict) else pk)
+            if "." in pk_name:
+                pk_name = pk_name.split(".")[-1].strip()
+            if name and pk_name:
+                key_columns.add((name, pk_name))
+
         for column in as_list(table.get("columns")) or as_list(table.get("fields")):
+            col_dict = as_dict(column)
             column_name = text(
-                as_dict(column).get("fabric_column_name")
-                or as_dict(column).get("qlik_column_name")
-                or as_dict(column).get("name")
+                col_dict.get("bi_column_name")
+                or col_dict.get("fabric_column_name")
+                or col_dict.get("qlik_column_name")
+                or col_dict.get("name")
+                or col_dict.get("Name")
             )
+            if "." in column_name:
+                column_name = column_name.split(".")[-1].strip()
             if name and column_name:
                 valid_columns.add((name, column_name))
-                if as_dict(column).get("is_key") or as_dict(column).get("isKey"):
+                is_pk = (
+                    col_dict.get("is_key")
+                    or col_dict.get("isKey")
+                    or col_dict.get("primary_key")
+                    or col_dict.get("primaryKey")
+                    or col_dict.get("is_primary_key")
+                    or col_dict.get("isPrimaryKey")
+                    or str(col_dict.get("key_type", "")).upper() in ("PRIMARY", "PK", "PRIMARY KEY")
+                    or str(col_dict.get("constraint", "")).upper() in ("PRIMARY", "PK", "PRIMARY KEY", "UNIQUE")
+                    or col_dict.get("is_unique")
+                    or col_dict.get("isUnique")
+                    or col_dict.get("unique")
+                )
+                if is_pk:
                     key_columns.add((name, column_name))
 
     # Attach measures and calculated columns to their host tables.
