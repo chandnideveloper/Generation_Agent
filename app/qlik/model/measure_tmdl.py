@@ -367,6 +367,13 @@ def group_by_table(
     """Return {table: {"measures": [...], "columns": [...]}}."""
     grouped: Dict[str, Dict[str, List[str]]] = {}
     seen_measures_global: Set[str] = set()
+    seen_calc_columns: Set[Tuple[str, str]] = set()
+
+    # Create a lower-cased lookup for physical columns to prevent case-insensitive collisions
+    physical_cols_lower: Set[Tuple[str, str]] = set()
+    if valid_columns:
+        for t, c in valid_columns:
+            physical_cols_lower.add((t.lower(), clean_tmdl_name(c).lower()))
 
     for measure in measures:
         if not isinstance(measure, dict):
@@ -381,6 +388,15 @@ def group_by_table(
         c_name = clean_tmdl_name(raw_name).lower()
         if c_name in seen_measures_global:
             continue
+        # Also prevent a measure from sharing a name with a physical column in the same table
+        if (table.lower(), c_name) in physical_cols_lower:
+            # Append " Measure" to disambiguate
+            raw_name += " Measure"
+            c_name = clean_tmdl_name(raw_name).lower()
+            if c_name in seen_measures_global:
+                continue
+            measure["name"] = raw_name
+            
         seen_measures_global.add(c_name)
 
         grouped.setdefault(table, {"measures": [], "columns": []})
@@ -399,10 +415,17 @@ def group_by_table(
 
         dax_expr = text(fabric.get("dax_expression") or column.get("dax_expression") or column.get("dax"))
         name = text(column.get("name") or fabric.get("name") or column.get("field"), "Dimension").strip()
+        c_name = clean_tmdl_name(name).lower()
 
-        # If already a physical column on this table, no need to synthesize
-        if valid_columns and (table, name) in valid_columns:
+        # Deduplicate calculated columns within the same table
+        if (table.lower(), c_name) in seen_calc_columns:
             continue
+            
+        # Prevent collisions with physical columns (case-insensitive)
+        if (table.lower(), c_name) in physical_cols_lower:
+            continue
+        
+        seen_calc_columns.add((table.lower(), c_name))
 
         # If no DAX expression is present, synthesize a sensible DAX expression based on the table's columns
         if not dax_expr:
