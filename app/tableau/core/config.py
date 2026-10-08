@@ -135,9 +135,95 @@ if Config.AZURE_OPENAI_API_KEY and Config.AZURE_OPENAI_ENDPOINT:
 # 3. MongoDB Client
 mongo_client = None
 mongo_db = None
+
 if Config.MONGODB_URL:
-    try:
-        mongo_client = AsyncIOMotorClient(Config.MONGODB_URL)
+    if Config.MONGODB_URL.startswith("http"):
+        # HTTP Proxy for FastAPI JSON Store
+        import httpx
+        class HTTPCollection:
+            def __init__(self, name, base_url):
+                self.name = name
+                self.base_url = base_url.rstrip('/')
+
+            async def find_one(self, query, sort=None):
+                route = self.name.replace('_', '-')
+                if self.name in ["mapping", "mapping_results"]:
+                    route = "mapping"
+                elif self.name == "data_layer_results":
+                    route = "data-layer"
+                elif self.name == "activities":
+                    route = "activities"
+                elif self.name == "logs":
+                    route = "logs"
+                elif self.name == "generation":
+                    route = "generation"
+                elif self.name == "settings":
+                    route = "settings"
+                    
+                url = f"{self.base_url}/api/records/{route}"
+                params = {}
+                for k, v in query.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        params[k] = v
+                        
+                async with httpx.AsyncClient() as client:
+                    try:
+                        resp = await client.get(url, params=params, timeout=15)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if isinstance(data, list) and data:
+                                return data[0]
+                            if isinstance(data, dict):
+                                return data
+                    except Exception as e:
+                        logger.warning(f"HTTP find_one error for {self.name}: {e}")
+                return None
+
+            async def insert_one(self, document):
+                route = self.name.replace('_', '-')
+                if self.name in ["mapping", "mapping_results"]:
+                    route = "mapping"
+                elif self.name == "data_layer_results":
+                    route = "data-layer"
+                elif self.name == "activities":
+                    route = "activities"
+                elif self.name == "logs":
+                    route = "logs"
+                elif self.name == "generation":
+                    route = "generation"
+                    
+                url = f"{self.base_url}/api/records/{route}"
+                async with httpx.AsyncClient() as client:
+                    try:
+                        resp = await client.post(url, json=document, timeout=15)
+                        resp.raise_for_status()
+                        return resp.json()
+                    except Exception as e:
+                        logger.warning(f"HTTP insert_one error for {self.name}: {e}")
+                        return None
+                        
+        class HTTPDatabase:
+            def __init__(self, base_url, db_name="db"):
+                self.base_url = base_url
+                self.name = db_name
+
+            def __getitem__(self, collection_name):
+                return HTTPCollection(collection_name, self.base_url)
+
+        class HTTPClient:
+            def __init__(self, base_url):
+                self.base_url = base_url
+
+            def __getitem__(self, db_name):
+                return HTTPDatabase(self.base_url, db_name)
+                
+        mongo_client = HTTPClient(Config.MONGODB_URL)
         mongo_db = mongo_client[Config.MONGODB_DB_NAME]
-    except Exception as e:
-        logger.error(f"[Config Error] Failed to initialize MongoDB client: {e}")
+        logger.info(f"Initialized HTTP MongoDB Proxy pointing to {Config.MONGODB_URL}")
+        
+    else:
+        try:
+            mongo_client = AsyncIOMotorClient(Config.MONGODB_URL)
+            mongo_db = mongo_client[Config.MONGODB_DB_NAME]
+        except Exception as e:
+            logger.error(f"[Config Error] Failed to initialize MongoDB client: {e}")
