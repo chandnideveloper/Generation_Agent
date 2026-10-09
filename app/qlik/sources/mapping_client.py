@@ -100,7 +100,18 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
     if not (run_id or app_id):
         raise MappingNotFound("A run_id or app_id is required to fetch a mapping result.")
 
-    mongo_uri = os.getenv("MONGO_URI")
+    def _id_variants(val: str) -> List[str]:
+        raw = val.strip()
+        v = [raw]
+        hyphenated = re.sub(r"[\s_]+", "-", raw)
+        spaced = re.sub(r"[-_]+", " ", raw)
+        if hyphenated not in v:
+            v.append(hyphenated)
+        if spaced not in v:
+            v.append(spaced)
+        return v
+
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     if mongo_uri:
         import pymongo
         try:
@@ -109,10 +120,12 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
                 db = client.get_database(db_name)
                 for coll_name in [ 'mapping_results','mapping']:
                     coll = db[coll_name]
-                    query = {}
-                    if run_id: query['run_id'] = run_id
-                    elif app_id: query['app_id'] = app_id
-                    doc = coll.find_one(query)
+                    doc = None
+                    if run_id: 
+                        doc = coll.find_one({'run_id': {"$in": _id_variants(run_id)}})
+                    if not doc and app_id: 
+                        doc = coll.find_one({'app_id': {"$in": _id_variants(app_id)}})
+                    
                     if doc:
                         logger.info(f"Loaded mapping directly from MongoDB ({db_name}.{coll_name})")
                         return doc
