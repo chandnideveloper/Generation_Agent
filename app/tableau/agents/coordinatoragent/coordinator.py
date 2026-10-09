@@ -250,27 +250,32 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
         target_branch = "main"
 
         try:
-            from app.tableau.core.config import mongo_db
+            from app.tableau.core.config import mongo_client
             async with aiohttp.ClientSession(headers=api_headers) as session:
-                
-                # Fetch Mapping Data from MongoDB
-                if mongo_db is None:
-                    raise ValueError("MONGODB_URL is not configured.")
+                if mongo_client is None:
+                    raise ValueError("MONGODB_URL is not configured (mongo_client is None).")
                 
                 # Handle formatting mismatch in DB where run_ids are occasionally saved with spaces
                 run_id_variants = [run_id, run_id.replace('-', ' '), run_id.replace(' ', '-')]
                 
-                first_record = await mongo_db["mapping"].find_one({
-                    "project_id": project_id,
-                    "workbook_id": workbook_id,
-                    "run_id": {"$in": run_id_variants}
-                })
-                if not first_record:
-                    first_record = await mongo_db["mapping_results"].find_one({
-                        "project_id": project_id,
-                        "workbook_id": workbook_id,
-                        "run_id": {"$in": run_id_variants}
-                    })
+                first_record = None
+                for db_name in ['QT2F', 'QT2F_Tableau', 'QlikDB', 'tableau']:
+                    db = mongo_client[db_name]
+                    for coll_name in ['mapping', 'mapping_results']:
+                        first_record = await db[coll_name].find_one({
+                            "project_id": project_id,
+                            "workbook_id": workbook_id,
+                            "run_id": {"$in": run_id_variants}
+                        })
+                        if not first_record:
+                            # Fallback: search just by run_id if project_id/workbook_id differ
+                            first_record = await db[coll_name].find_one({
+                                "run_id": {"$in": run_id_variants}
+                            })
+                        if first_record:
+                            break
+                    if first_record:
+                        break
                 
                 if not first_record:
                     err_msg = f"No mapping records found for project_id={project_id}, workbook_id={workbook_id}, run_id={run_id}"
