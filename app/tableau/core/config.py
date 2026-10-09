@@ -166,17 +166,27 @@ if Config.MONGODB_URL:
                     if isinstance(v, (str, int, float, bool)):
                         params[k] = v
                         
+                import asyncio
                 async with httpx.AsyncClient() as client:
-                    try:
-                        resp = await client.get(url, params=params, timeout=15)
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            if isinstance(data, list) and data:
-                                return data[0]
-                            if isinstance(data, dict):
-                                return data
-                    except Exception as e:
-                        logger.warning(f"HTTP find_one error for {self.name}: {e}")
+                    for attempt in range(4):
+                        try:
+                            resp = await client.get(url, params=params, timeout=15)
+                            if resp.status_code == 200:
+                                data = resp.json()
+                                if isinstance(data, list) and data:
+                                    return data[0]
+                                if isinstance(data, dict):
+                                    return data
+                                return None
+                            elif resp.status_code == 404:
+                                return None
+                            else:
+                                logger.warning(f"HTTP find_one for {self.name} returned {resp.status_code} on attempt {attempt+1}")
+                        except Exception as e:
+                            logger.warning(f"HTTP find_one error for {self.name} on attempt {attempt+1}: {e}")
+                        
+                        if attempt < 3:
+                            await asyncio.sleep(2 ** attempt)
                 return None
 
             async def insert_one(self, document):
@@ -193,14 +203,21 @@ if Config.MONGODB_URL:
                     route = "generation"
                     
                 url = f"{self.base_url}/api/records/{route}"
+                import asyncio
                 async with httpx.AsyncClient() as client:
-                    try:
-                        resp = await client.post(url, json=document, timeout=15)
-                        resp.raise_for_status()
-                        return resp.json()
-                    except Exception as e:
-                        logger.warning(f"HTTP insert_one error for {self.name}: {e}")
-                        return None
+                    for attempt in range(4):
+                        try:
+                            resp = await client.post(url, json=document, timeout=15)
+                            if resp.status_code in (200, 201):
+                                return resp.json()
+                            else:
+                                logger.warning(f"HTTP insert_one for {self.name} returned {resp.status_code} on attempt {attempt+1}")
+                        except Exception as e:
+                            logger.warning(f"HTTP insert_one error for {self.name} on attempt {attempt+1}: {e}")
+                            
+                        if attempt < 3:
+                            await asyncio.sleep(2 ** attempt)
+                    return None
                         
         class HTTPDatabase:
             def __init__(self, base_url, db_name="db"):

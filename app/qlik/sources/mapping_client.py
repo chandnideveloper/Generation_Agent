@@ -100,6 +100,25 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
     if not (run_id or app_id):
         raise MappingNotFound("A run_id or app_id is required to fetch a mapping result.")
 
+    mongo_uri = os.getenv("MONGO_URI")
+    if mongo_uri:
+        import pymongo
+        try:
+            client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+            for db_name in ['QT2F', 'QT2F_Tableau', 'QlikDB', 'tableau']:
+                db = client.get_database(db_name)
+                for coll_name in [ 'mapping_results','mapping']:
+                    coll = db[coll_name]
+                    query = {}
+                    if run_id: query['run_id'] = run_id
+                    elif app_id: query['app_id'] = app_id
+                    doc = coll.find_one(query)
+                    if doc:
+                        logger.info(f"Loaded mapping directly from MongoDB ({db_name}.{coll_name})")
+                        return doc
+        except Exception as e:
+            logger.warning(f"Direct MongoDB fetch failed: {e}")
+
     def _id_variants(val: str) -> List[str]:
         raw = val.strip()
         v = [raw]

@@ -257,16 +257,19 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                 if mongo_db is None:
                     raise ValueError("MONGODB_URL is not configured.")
                 
+                # Handle formatting mismatch in DB where run_ids are occasionally saved with spaces
+                run_id_variants = [run_id, run_id.replace('-', ' '), run_id.replace(' ', '-')]
+                
                 first_record = await mongo_db["mapping"].find_one({
                     "project_id": project_id,
                     "workbook_id": workbook_id,
-                    "run_id": run_id
+                    "run_id": {"$in": run_id_variants}
                 })
                 if not first_record:
                     first_record = await mongo_db["mapping_results"].find_one({
                         "project_id": project_id,
                         "workbook_id": workbook_id,
-                        "run_id": run_id
+                        "run_id": {"$in": run_id_variants}
                     })
                 
                 if not first_record:
@@ -286,7 +289,7 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                     )
                     return error_response
                     
-                outer_payload = first_record.get("payload", {})
+                outer_payload = first_record.get("mapping_result") or first_record.get("payload", {})
 
                 raw_project_name = (outer_payload.get("workbook_metadata") or {}).get("name") or \
                                    first_record.get("project_name") or \
