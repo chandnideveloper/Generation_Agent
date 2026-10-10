@@ -90,7 +90,7 @@ class Config:
     # Local Application Settings
     # ==========================================================================
     LOCAL_SOURCE_FOLDER = "tableau_source"
-    BASE_API_URL = "http://localhost:8080"
+    BASE_API_URL = os.getenv("BASE_API_URL", "http://localhost:8080")
     MAX_RETRIES = 3
     RETRY_DELAY = 1
 

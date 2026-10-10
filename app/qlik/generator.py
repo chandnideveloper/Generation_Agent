@@ -52,8 +52,9 @@ _TELEMETRY_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-te
 
 def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (0.2, 0.5)) -> None:
     import requests
+    import os
     bases = [
-        "http://127.0.0.1:8008",
+        os.getenv("TELEMETRY_LOCAL_API"),
         config.MONGO_API_URL,
     ]
     for base in bases:

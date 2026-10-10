@@ -105,11 +105,12 @@ class MigrationOrchestrator:
         target_dir = gh.target_directory
 
         # 1. Resolve mapping document
+        space_id = source.get("space_id")
         if request.mapping_result:
             document = request.mapping_result
         else:
             try:
-                document = fetch_mapping(app_id=app_id, run_id=run_id)
+                document = fetch_mapping(app_id=app_id, run_id=run_id, space_id=space_id)
             except MappingNotFound as exc:
                 raise ValueError(str(exc)) from exc
             except Exception as exc:

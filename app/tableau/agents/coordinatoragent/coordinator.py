@@ -266,12 +266,12 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                             "project_id": project_id,
                             "workbook_id": workbook_id,
                             "run_id": {"$in": run_id_variants}
-                        })
+                        }, sort=[('_id', -1)])
                         if not first_record:
                             # Fallback: search just by run_id if project_id/workbook_id differ
                             first_record = await db[coll_name].find_one({
                                 "run_id": {"$in": run_id_variants}
-                            })
+                            }, sort=[('_id', -1)])
                         if first_record:
                             break
                     if first_record:

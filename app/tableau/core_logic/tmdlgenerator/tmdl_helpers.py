@@ -558,7 +558,7 @@ class TmdlHelperMixin:
                         m_script = m_script[:match.start()]
                         if not m_script.strip().endswith(','):
                             m_script += ","
-                        m_script += f"\n                #\"Final Renamed Columns\" = Table.RenameColumns({final_step}, {mapping_str})\n            in\n                #\"Final Renamed Columns\""
+                        m_script += f"\n                #\"Final Renamed Columns\" = Table.RenameColumns({final_step}, {mapping_str}, MissingField.Ignore)\n            in\n                #\"Final Renamed Columns\""
             else:
                 target_conn_temp = self._find_target_connection(connection_info, table_def, t_name)
                 conn_type = (target_conn_temp.get('type') or connection_info.get('type', '')).lower()
@@ -601,7 +601,7 @@ class TmdlHelperMixin:
 
                     # 2. Rename Step
                     if mappings:
-                        m_lines.append(f"    #\"Renamed Columns\" = Table.RenameColumns({current_step}, {mapping_str}),")
+                        m_lines.append(f"    #\"Renamed Columns\" = Table.RenameColumns({current_step}, {mapping_str}, MissingField.Ignore),")
                         current_step = "#\"Renamed Columns\""
                     return current_step
 

@@ -140,6 +140,7 @@ class DownloadRequest(BaseModel):
     run_id: str
     app_id: Optional[str] = None
     app_name: Optional[str] = None
+    space_id: Optional[str] = None
 
 
 class VisualNote(BaseModel):

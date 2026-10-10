@@ -46,7 +46,7 @@ def generate_endpoint(request: GenerateRequest):
         )
 
     try:
-        document = request.mapping_result or fetch_mapping(request.app_id, request.run_id)
+        document = request.mapping_result or fetch_mapping(request.app_id, request.run_id, request.space_id)
     except MappingNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -76,7 +76,7 @@ def download_endpoint(request: DownloadRequest):
 
     if package is None:
         try:
-            document = fetch_mapping(request.app_id, request.run_id)
+            document = fetch_mapping(request.app_id, request.run_id, request.space_id)
         except MappingNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001

@@ -40,7 +40,7 @@ def _norm(s: Any) -> str:
     return re.sub(r"[\s_\-]+", "-", str(s).strip().lower())
 
 
-def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Optional[str]) -> bool:
+def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Optional[str], space_id: Optional[str] = None) -> bool:
     """True when `row` really is the mapping for the requested app/run.
 
     Some store endpoints ignore the id in the path and answer with the newest
@@ -61,7 +61,7 @@ def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Option
                 found.add(str(value).strip())
         return found
 
-    for requested, key in ((run_id, "run_id"), (app_id, "app_id")):
+    for requested, key in ((run_id, "run_id"), (app_id, "app_id"), (space_id, "space_id")):
         if not requested:
             continue
         stated = _candidates(key)
@@ -91,14 +91,14 @@ def _bases() -> List[str]:
     return clean
 
 
-def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any]:
+def fetch_mapping(app_id: Optional[str], run_id: Optional[str], space_id: Optional[str] = None) -> Dict[str, Any]:
     """Newest mapping result for a run, falling back to the app.
 
     Every candidate path is scoped to the requested run_id or app_id, and
     every returned document is checked against that id before it is used.
     """
-    if not (run_id or app_id):
-        raise MappingNotFound("A run_id or app_id is required to fetch a mapping result.")
+    if not (run_id or app_id or space_id):
+        raise MappingNotFound("A run_id, app_id, or space_id is required to fetch a mapping result.")
 
     def _id_variants(val: str) -> List[str]:
         raw = val.strip()
@@ -112,7 +112,7 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
         return v
 
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
-    if mongo_uri:
+    if mongo_uri and mongo_uri.startswith("mongodb"):
         import pymongo
         try:
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
@@ -121,10 +121,15 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
                 for coll_name in [ 'mapping_results','mapping']:
                     coll = db[coll_name]
                     doc = None
-                    if run_id: 
-                        doc = coll.find_one({'run_id': {"$in": _id_variants(run_id)}})
-                    if not doc and app_id: 
-                        doc = coll.find_one({'app_id': {"$in": _id_variants(app_id)}})
+                    query = {}
+                    if run_id:
+                        query['run_id'] = {"$in": _id_variants(run_id)}
+                    if app_id:
+                        query['app_id'] = {"$in": _id_variants(app_id)}
+                    if space_id:
+                        query['space_id'] = {"$in": _id_variants(space_id)}
+                    if query:
+                        doc = coll.find_one(query, sort=[('_id', -1)])
                     
                     if doc:
                         logger.info(f"Loaded mapping directly from MongoDB ({db_name}.{coll_name})")
@@ -187,11 +192,11 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
                 has_mapping = (isinstance(mapping, dict) and bool(mapping)) or bool(row.get("tables"))
                 if not has_mapping:
                     continue
-                if not _identity_matches(row, app_id, run_id):
+                if not _identity_matches(row, app_id, run_id, space_id):
                     rejected += 1
                     logger.warning(
-                        "Discarding mapping from %s: it belongs to a different app/run than "
-                        "app_id=%r run_id=%r.", url, app_id, run_id,
+                        "Discarding mapping from %s: it belongs to a different app/run/space than "
+                        "app_id=%r run_id=%r space_id=%r.", url, app_id, run_id, space_id,
                     )
                     continue
                 m_dict = mapping if isinstance(mapping, dict) else row
@@ -209,10 +214,10 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str]) -> Dict[str, Any
                 return best_row
 
     detail = (
-        f" {rejected} document(s) were returned but belonged to a different app/run."
+        f" {rejected} document(s) were returned but belonged to a different app/run/space."
         if rejected else ""
     )
     raise MappingNotFound(
-        f"No mapping result found for run_id={run_id!r} / app_id={app_id!r}.{detail} "
+        f"No mapping result found for run_id={run_id!r} / app_id={app_id!r} / space_id={space_id!r}.{detail} "
         "Run the mapping agent first."
     )
