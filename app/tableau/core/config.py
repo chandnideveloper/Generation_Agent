@@ -28,10 +28,6 @@ class EnvValidator(BaseModel):
         if self.ENVIRONMENT and self.ENVIRONMENT.lower() == "production":
             missing = []
             if not self.MONGODB_URL: missing.append("MONGODB_URL")
-            if not self.KEYVAULT_API_URL: missing.append("KEYVAULT_API_URL")
-            if not self.DEPLOYMENT_SETTINGS_API_URL: missing.append("DEPLOYMENT_SETTINGS_API_URL")
-            if not self.AZURE_OPENAI_API_KEY: missing.append("AZURE_OPENAI_API_KEY")
-            if not self.AZURE_OPENAI_ENDPOINT: missing.append("AZURE_OPENAI_ENDPOINT")
             if missing:
                 raise ValueError(f"[Fail-Fast Config] Missing required environment variables for production environment: {', '.join(missing)}")
 
