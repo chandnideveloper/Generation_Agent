@@ -1,0 +1,59 @@
+name: Deploy to AWS Lambda
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build & Deploy Generation Agent
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'ap-southeast-2' }}
+
+      - name: Install dependencies
+        run: |
+          mkdir -p package
+          pip install --no-cache-dir --target ./package -r requirements.txt mangum
+          # Clean up unnecessary cache and documentation files to keep the zip lean
+          find ./package -type d -name "__pycache__" -exec rm -rf {} +
+          find ./package -type d -name "tests" -exec rm -rf {} +
+          find ./package -name "*.pyc" -delete
+
+      - name: Create Deployment Package
+        run: |
+          cd package
+          zip -r -9 ../deployment.zip .
+          cd ..
+          zip -g deployment.zip main.py lambda_function.py
+          zip -r -g deployment.zip app/
+          echo "Package size: $(ls -lh deployment.zip | awk '{print $5}')"
+
+      - name: Deploy to AWS Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME || 'generation' }} \
+            --zip-file fileb://deployment.zip \
+            --publish
+
+      - name: Wait for Lambda update to complete
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME || 'generation' }}
+          echo "Deployment successful and live!"
