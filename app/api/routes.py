@@ -150,6 +150,46 @@ async def get_migration_status(
         )
 
 
+@router.get(
+    "/api/records/activities",
+    summary="Get agent actions / activities trail for a given run_id",
+)
+async def get_agent_activities(
+    run_id: str,
+):
+    if not run_id:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "run_id parameter is required."}
+        )
+
+    import os
+    import httpx
+    from app.qlik.config import config as qlik_config
+    bases = [
+        qlik_config.MONGO_API_URL,
+        os.getenv("MONGODB_URL"),
+    ]
+
+    for base in bases:
+        if not base:
+            continue
+        url = f"{base.rstrip('/')}/api/records/activities"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, params={"run_id": run_id.strip()}, timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return JSONResponse(status_code=200, content=data)
+        except Exception as e:
+            logger.warning(f"Failed to fetch activities from {url}: {e}")
+
+    return JSONResponse(
+        status_code=404,
+        content={"status": "error", "message": f"No activities found for run_id={run_id}"}
+    )
+
+
 @router.post(
     "/migrate",
     response_model=UnifiedMigrateResponse,
