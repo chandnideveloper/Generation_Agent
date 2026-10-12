@@ -189,6 +189,10 @@ class TmdlGenerator:
             
             clean = wrap_raw_columns(clean)
 
+        if hasattr(self, '_parameter_names') and self._parameter_names and not is_parameter:
+            for pname in self._parameter_names:
+                clean = re.sub(rf'\[\s*{re.escape(pname)}\s*\]', f"SELECTEDVALUE('{pname}'[Value])", clean, flags=re.IGNORECASE)
+
         return clean
 
     def _normalize_table_name(self, name: str) -> str:
@@ -836,6 +840,8 @@ class TmdlGenerator:
                         lines.append('        annotation PBI_FormatHint = {"isGeneralNumber":true}')
                 lines.append("")
 
+        extra_measure_names = {self._sanitize_name(m.get('name', '')).lower() for m in (extra_measures or []) if isinstance(m, dict) and m.get('name')}
+
         # 2. Calculated Columns
         if actual_calcs:
             for calc in actual_calcs:
@@ -861,6 +867,9 @@ class TmdlGenerator:
                         c_name = potential_name
                         formula = right_side
                 
+                if c_name.lower() in extra_measure_names:
+                    log_info(f"Skipping calculated column '{c_name}' on table '{t_name}' because it is defined as a measure")
+                    continue
                 if c_name in seen_columns: continue
                 seen_columns.add(c_name)
                 
@@ -943,14 +952,39 @@ class TmdlGenerator:
                     lines.append("") 
         # 3. Measures
         if extra_measures:
-            seen_measure_names = set()
+            if not hasattr(self, '_model_measures') or self._model_measures is None:
+                self._model_measures = set()
+            seen_columns_lower = {str(c).lower() for c in seen_columns}
             for meas in extra_measures:
                 m_name = self._sanitize_name(meas.get('name'))
-                if not m_name or m_name.lower() in seen_measure_names:
+                if not m_name:
                     continue
-                seen_measure_names.add(m_name.lower())
+                if m_name.lower() in seen_columns_lower:
+                    log_info(f"Measure '{m_name}' collides with column in table '{t_name}'. Disambiguating to '{m_name} Measure'")
+                    m_name = f"{m_name} Measure"
+                m_name_lower = m_name.lower()
+                if m_name_lower in self._model_measures:
+                    log_info(f"Skipping duplicate measure '{m_name}' on table '{t_name}' (already defined in model)")
+                    continue
+                self._model_measures.add(m_name_lower)
                 raw_dax = meas.get('dax_formula') or meas.get('powerbi_formula')
                 dax = self._clean_dax(raw_dax, is_measure=True, table_to_cols=table_to_cols, display_to_qualified=display_to_qualified) or "BLANK()"
+                
+                # Check and break any self-referencing circular dependency: measure 'M' referencing [M]
+                self_ref_candidates = {m_name}
+                orig_m_name = meas.get('name')
+                if orig_m_name:
+                    self_ref_candidates.add(self._sanitize_name(orig_m_name))
+                for cand in self_ref_candidates:
+                    cand_pattern = re.compile(rf'\[\s*{re.escape(cand)}\s*\]', re.IGNORECASE)
+                    if cand_pattern.search(dax):
+                        if hasattr(self, '_parameter_names') and any(cand.lower() == p.lower() for p in self._parameter_names):
+                            dax = cand_pattern.sub(f"SELECTEDVALUE('{cand}'[Value])", dax)
+                        elif cand.lower() in seen_columns_lower:
+                            dax = cand_pattern.sub(f"'{t_name}'[{cand}]", dax)
+                        else:
+                            dax = cand_pattern.sub(f"SELECTEDVALUE('{cand}'[Value])", dax)
+                        log_info(f"Resolved circular self-reference '{cand}' in measure '{m_name}' on table '{t_name}'")
                 
                 lines.append(f"    measure '{m_name}' =")
                 lines.append(indent_block(dax, 8))
@@ -1247,6 +1281,7 @@ class TmdlGenerator:
             else:
                 parameters = api_data.get('parameters', [])
                 if not isinstance(parameters, list): parameters = []
+            self._parameter_names = {self._sanitize_name(p.get('name')) for p in parameters if isinstance(p, dict) and p.get('name')}
             actions = api_data.get('actions', [])
             if not isinstance(actions, list): actions = []
 
@@ -1878,36 +1913,77 @@ class TmdlGenerator:
 
             measure_blocks = []
             
-            # Always include the default harvest measure
-            harvest_name = f'Selected{name.replace(" ", "").replace("-", "").replace("%", "Percent")}'
+            # Collect all existing model measure names to prevent conflicts
+            existing_model_measures = set()
+            if hasattr(self, '_model_measures') and self._model_measures:
+                existing_model_measures.update(self._model_measures)
+            if api_data:
+                for m in api_data.get("measures", []):
+                    if isinstance(m, dict) and m.get("name"):
+                        existing_model_measures.add(self._sanitize_name(m["name"]).lower())
+                c_lods = api_data.get("Calculated Fields & LODs", {})
+                if isinstance(c_lods, dict):
+                    for cf in c_lods.get("calculated_fields", []):
+                        if isinstance(cf, dict) and cf.get("name"):
+                            existing_model_measures.add(self._sanitize_name(cf["name"]).lower())
+
+            # Always include the default harvest measure, ensuring it is unique in the Model
+            clean_pname = name.replace(" ", "").replace("-", "").replace("%", "Percent")
+            candidate_harvest = f'Selected{clean_pname}'
+            if candidate_harvest.lower() in existing_model_measures or f'selected {name.lower()}' in existing_model_measures or f'selected{name.lower()}' in existing_model_measures:
+                harvest_name = f'Selected{clean_pname}Value'
+            else:
+                harvest_name = candidate_harvest
+
+            if harvest_name.lower() in existing_model_measures:
+                harvest_name = f'{harvest_name}Param'
+
+            existing_model_measures.add(harvest_name.lower())
+            if hasattr(self, '_model_measures') and self._model_measures is not None:
+                self._model_measures.add(harvest_name.lower())
+
             harvest_measure_block = f"""    measure '{harvest_name}'
         expression: SELECTEDVALUE('{name}'[{ref_column}], {default_val})
         formatString: {format_str}
         isHidden: true"""
             measure_blocks.append(harvest_measure_block)
+            seen_param_measures = {harvest_name.lower()}
 
             # Add measures from targeted calcs (Calculated Fields & LODs)
             for tc in targeted_calcs:
                 tc_type = str(tc.get("type", "")).strip().lower()
                 if tc_type == "measure":
                     measure_name = self._sanitize_name(tc.get("name", "CustomFilter"))
-                    if measure_name != harvest_name:
+                    m_lower = measure_name.lower()
+                    if m_lower not in seen_param_measures and m_lower not in existing_model_measures:
+                        seen_param_measures.add(m_lower)
+                        existing_model_measures.add(m_lower)
+                        if hasattr(self, '_model_measures') and self._model_measures is not None:
+                            self._model_measures.add(m_lower)
                         raw_meas_dax = tc.get("dax_formula") or tc.get("powerbi_formula") or "1"
                         cleaned_meas_dax = self._clean_dax(raw_meas_dax)
                         measure_blocks.append(f"""    measure '{measure_name}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                         log_info(f"[add_parameters] Using '{measure_name}' as measure for parameter '{name}'")
+                    else:
+                        log_info(f"[add_parameters] Skipping duplicate measure '{measure_name}' on parameter '{name}' (already in model)")
 
             # Add measures from top-level measures
             for m in mapped_measures:
                 measure_name = self._sanitize_name(m.get("name"))
-                if measure_name != harvest_name:
-                    if not any(self._sanitize_name(tc.get("name")) == measure_name for tc in targeted_calcs):
-                        raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "1"
-                        cleaned_meas_dax = self._clean_dax(raw_meas_dax)
-                        measure_blocks.append(f"""    measure '{measure_name}' =
+                m_lower = measure_name.lower()
+                if m_lower not in seen_param_measures and m_lower not in existing_model_measures:
+                    seen_param_measures.add(m_lower)
+                    existing_model_measures.add(m_lower)
+                    if hasattr(self, '_model_measures') and self._model_measures is not None:
+                        self._model_measures.add(m_lower)
+                    raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "1"
+                    cleaned_meas_dax = self._clean_dax(raw_meas_dax)
+                    measure_blocks.append(f"""    measure '{measure_name}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
-                        log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")
+                    log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")
+                else:
+                    log_info(f"[add_parameters] Skipping duplicate measure '{measure_name}' on parameter '{name}' (already in model)")
 
             measure_block = "\n\n".join(measure_blocks)
 

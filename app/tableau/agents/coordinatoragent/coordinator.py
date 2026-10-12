@@ -180,8 +180,22 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                 record.update(extra_metadata)
             
             log_info(f"[CoordinatorAgent] Saving generation record ({status}) to MongoDB")
-            await mongo_db["generation"].insert_one(record)
-            log_info(f"[CoordinatorAgent] Successfully saved generation record | Status: {status}")
+            query = {"run_id": run_id}
+            if project_id:
+                query["project_id"] = project_id
+            if workbook_id:
+                query["workbook_id"] = workbook_id
+
+            await mongo_db["generation"].update_one(query, {"$set": record}, upsert=True)
+
+            # If completed, clean up any previous failed records for this run_id so validation never reads stale failures
+            if status == "completed":
+                try:
+                    await mongo_db["generation_results"].delete_many({"run_id": run_id, "status": "failed"})
+                except Exception as de:
+                    log_warning(f"[CoordinatorAgent] Could not clean up failed generation_results: {de}")
+
+            log_info(f"[CoordinatorAgent] Successfully upserted generation record | Status: {status}")
         except Exception as e:
             log_error(f"[CoordinatorAgent] Failed to save generation record to MongoDB: {e}")
 

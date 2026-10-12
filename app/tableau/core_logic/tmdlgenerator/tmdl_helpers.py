@@ -126,6 +126,9 @@ class TmdlHelperMixin:
         if is_parameter and "=" in clean and not clean.lstrip().upper().startswith("VAR "):
             parts = clean.split('=', 1)
             if '\n' not in parts[0] and len(parts[0]) < 100: clean = parts[1].strip()
+        if hasattr(self, '_parameter_names') and self._parameter_names and not is_parameter:
+            for pname in self._parameter_names:
+                clean = re.sub(rf'\[\s*{re.escape(pname)}\s*\]', f"SELECTEDVALUE('{pname}'[Value])", clean, flags=re.IGNORECASE)
         return clean
 
     def _generate_local_date_table_tmdl(self, parent_table: str, col_name: str,
@@ -391,6 +394,8 @@ class TmdlHelperMixin:
             if extra_measures is None: extra_measures = []
             extra_measures.extend(extra_measures_from_calcs)
 
+        extra_measure_names = {self._sanitize_name(m.get('name', '')).lower() for m in (extra_measures or []) if isinstance(m, dict) and m.get('name')}
+
         if actual_calcs:
             for calc in actual_calcs:
                 c_name = self._sanitize_name(calc.get('name'))
@@ -412,6 +417,9 @@ class TmdlHelperMixin:
                         c_name = potential_name
                         formula = parts[1].strip()
 
+                if c_name.lower() in extra_measure_names:
+                    log_info(f"Skipping calculated column '{c_name}' on table '{t_name}' because it is defined as a measure")
+                    continue
                 if c_name in seen_columns: continue
                 seen_columns.add(c_name)
                 if not formula and calc.get('base_field'): formula = f"[{calc.get('base_field')}]"
@@ -490,14 +498,39 @@ class TmdlHelperMixin:
                     lines.extend(["", "        summarizeBy: none", ""])
 
         if extra_measures:
-            seen_measure_names = set()
+            if not hasattr(self, '_model_measures') or self._model_measures is None:
+                self._model_measures = set()
+            seen_columns_lower = {str(c).lower() for c in seen_columns}
             for meas in extra_measures:
                 m_name = self._sanitize_name(meas.get('name'))
-                if not m_name or m_name.lower() in seen_measure_names:
+                if not m_name:
                     continue
-                seen_measure_names.add(m_name.lower())
+                if m_name.lower() in seen_columns_lower:
+                    log_info(f"Measure '{m_name}' collides with column in table '{t_name}'. Disambiguating to '{m_name} Measure'")
+                    m_name = f"{m_name} Measure"
+                m_name_lower = m_name.lower()
+                if m_name_lower in self._model_measures:
+                    log_info(f"Skipping duplicate measure '{m_name}' on table '{t_name}' (already defined in model)")
+                    continue
+                self._model_measures.add(m_name_lower)
                 raw_dax = meas.get('dax_formula') or meas.get('powerbi_formula')
                 dax = self._clean_dax(raw_dax) or "BLANK()"
+                
+                # Check and break any self-referencing circular dependency: measure 'M' referencing [M]
+                self_ref_candidates = {m_name}
+                orig_m_name = meas.get('name')
+                if orig_m_name:
+                    self_ref_candidates.add(self._sanitize_name(orig_m_name))
+                for cand in self_ref_candidates:
+                    cand_pattern = re.compile(rf'\[\s*{re.escape(cand)}\s*\]', re.IGNORECASE)
+                    if cand_pattern.search(dax):
+                        if hasattr(self, '_parameter_names') and any(cand.lower() == p.lower() for p in self._parameter_names):
+                            dax = cand_pattern.sub(f"SELECTEDVALUE('{cand}'[Value])", dax)
+                        elif cand.lower() in seen_columns_lower:
+                            dax = cand_pattern.sub(f"'{t_name}'[{cand}]", dax)
+                        else:
+                            dax = cand_pattern.sub(f"SELECTEDVALUE('{cand}'[Value])", dax)
+                        log_info(f"Resolved circular self-reference '{cand}' in measure '{m_name}' on table '{t_name}'")
                 
                 lines.append(f"    measure '{self._escape_tmdl_identifier(m_name)}' =")
                 lines.append(indent_block(dax, 8))

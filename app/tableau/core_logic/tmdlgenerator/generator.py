@@ -148,36 +148,77 @@ class TmdlGenerator(TmdlHelperMixin):
 
             measure_blocks = []
             
-            # Always include the default harvest measure
-            harvest_name = f'Selected{name.replace(" ", "").replace("-", "").replace("%", "Percent")}'
+            # Collect all existing model measure names to prevent conflicts
+            existing_model_measures = set()
+            if hasattr(self, '_model_measures') and self._model_measures:
+                existing_model_measures.update(self._model_measures)
+            if api_data:
+                for m in api_data.get("measures", []):
+                    if isinstance(m, dict) and m.get("name"):
+                        existing_model_measures.add(self._sanitize_name(m["name"]).lower())
+                c_lods = api_data.get("Calculated Fields & LODs", {})
+                if isinstance(c_lods, dict):
+                    for cf in c_lods.get("calculated_fields", []):
+                        if isinstance(cf, dict) and cf.get("name"):
+                            existing_model_measures.add(self._sanitize_name(cf["name"]).lower())
+
+            # Always include the default harvest measure, ensuring it is unique in the Model
+            clean_pname = name.replace(" ", "").replace("-", "").replace("%", "Percent")
+            candidate_harvest = f'Selected{clean_pname}'
+            if candidate_harvest.lower() in existing_model_measures or f'selected {name.lower()}' in existing_model_measures or f'selected{name.lower()}' in existing_model_measures:
+                harvest_name = f'Selected{clean_pname}Value'
+            else:
+                harvest_name = candidate_harvest
+
+            if harvest_name.lower() in existing_model_measures:
+                harvest_name = f'{harvest_name}Param'
+
+            existing_model_measures.add(harvest_name.lower())
+            if hasattr(self, '_model_measures') and self._model_measures is not None:
+                self._model_measures.add(harvest_name.lower())
+
             harvest_measure_block = f"""    measure '{self._escape_tmdl_identifier(harvest_name)}'
         expression: SELECTEDVALUE('{self._escape_tmdl_identifier(name)}'[{ref_column}], {default_val})
         formatString: {format_str}
         isHidden: true"""
             measure_blocks.append(harvest_measure_block)
+            seen_param_measures = {harvest_name.lower()}
 
             # Add measures from targeted calcs (Calculated Fields & LODs)
             for tc in targeted_calcs:
                 tc_type = str(tc.get("type", "")).strip().lower()
                 if tc_type == "measure":
                     measure_name = self._sanitize_name(tc.get("name", "CustomFilter"))
-                    if measure_name != harvest_name:
+                    m_lower = measure_name.lower()
+                    if m_lower not in seen_param_measures and m_lower not in existing_model_measures:
+                        seen_param_measures.add(m_lower)
+                        existing_model_measures.add(m_lower)
+                        if hasattr(self, '_model_measures') and self._model_measures is not None:
+                            self._model_measures.add(m_lower)
                         raw_meas_dax = tc.get("dax_formula") or tc.get("powerbi_formula") or "1"
                         cleaned_meas_dax = self._clean_dax(raw_meas_dax)
                         measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                         log_info(f"[add_parameters] Using '{measure_name}' as measure for parameter '{name}'")
+                    else:
+                        log_info(f"[add_parameters] Skipping duplicate measure '{measure_name}' on parameter '{name}' (already in model)")
 
             # Add measures from top-level measures
             for m in mapped_measures:
                 measure_name = self._sanitize_name(m.get("name"))
-                if measure_name != harvest_name:
-                    if not any(self._sanitize_name(tc.get("name")) == measure_name for tc in targeted_calcs):
-                        raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "1"
-                        cleaned_meas_dax = self._clean_dax(raw_meas_dax)
-                        measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
+                m_lower = measure_name.lower()
+                if m_lower not in seen_param_measures and m_lower not in existing_model_measures:
+                    seen_param_measures.add(m_lower)
+                    existing_model_measures.add(m_lower)
+                    if hasattr(self, '_model_measures') and self._model_measures is not None:
+                        self._model_measures.add(m_lower)
+                    raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "1"
+                    cleaned_meas_dax = self._clean_dax(raw_meas_dax)
+                    measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
-                        log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")
+                    log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")
+                else:
+                    log_info(f"[add_parameters] Skipping duplicate measure '{measure_name}' on parameter '{name}' (already in model)")
 
             measure_block = "\n\n".join(measure_blocks)
 
@@ -268,6 +309,7 @@ class TmdlGenerator(TmdlHelperMixin):
             else:
                 parameters = api_data.get('parameters', [])
                 if not isinstance(parameters, list): parameters = []
+            self._parameter_names = {self._sanitize_name(p.get('name')) for p in parameters if isinstance(p, dict) and p.get('name')}
             actions = api_data.get('actions', [])
             if not isinstance(actions, list): actions = []
 
