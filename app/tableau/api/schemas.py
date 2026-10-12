@@ -16,6 +16,7 @@ class TmdlRequest(BaseModel):
     git_org: Optional[str] = None
     git_repo: Optional[str] = None
     git_pat: Optional[str] = None
+    mapping_result: Optional[Dict[str, Any]] = None
 
 class CosmosLogRecord(BaseModel):
     project_name: str

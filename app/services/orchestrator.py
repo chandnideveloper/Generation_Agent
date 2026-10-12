@@ -194,6 +194,7 @@ class MigrationOrchestrator:
             git_pat=gh.git_pat,
             branch=gh.branch,
             token=client_token or "local-dev-token",
+            mapping_result=getattr(request, "mapping_result", None),
         )
 
         # 2. Instantiate request-scoped agents

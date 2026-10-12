@@ -271,25 +271,30 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                 
                 # Handle formatting mismatch in DB where run_ids are occasionally saved with spaces
                 run_id_variants = [run_id, run_id.replace('-', ' '), run_id.replace(' ', '-')]
+                run_id_variants = list(dict.fromkeys(run_id_variants))
                 
-                first_record = None
-                for db_name in ['QT2F', 'QT2F_Tableau', 'QlikDB', 'tableau']:
-                    db = mongo_client[db_name]
-                    for coll_name in ['mapping', 'mapping_results']:
-                        first_record = await db[coll_name].find_one({
-                            "project_id": project_id,
-                            "workbook_id": workbook_id,
-                            "run_id": {"$in": run_id_variants}
-                        }, sort=[('_id', -1)])
-                        if not first_record:
-                            # Fallback: search just by run_id if project_id/workbook_id differ
+                first_record = getattr(request, "mapping_result", None)
+                if not first_record:
+                    is_http_mongo = hasattr(mongo_client, "base_url") or getattr(Config, "MONGODB_URL", "").startswith("http")
+                    db_names = ["QT2F"] if is_http_mongo else ['QT2F', 'QT2F_Tableau', 'QlikDB', 'tableau']
+                    coll_names = ["mapping"] if is_http_mongo else ['mapping', 'mapping_results']
+                    for db_name in db_names:
+                        db = mongo_client[db_name]
+                        for coll_name in coll_names:
                             first_record = await db[coll_name].find_one({
+                                "project_id": project_id,
+                                "workbook_id": workbook_id,
                                 "run_id": {"$in": run_id_variants}
                             }, sort=[('_id', -1)])
+                            if not first_record:
+                                # Fallback: search just by run_id if project_id/workbook_id differ
+                                first_record = await db[coll_name].find_one({
+                                    "run_id": {"$in": run_id_variants}
+                                }, sort=[('_id', -1)])
+                            if first_record:
+                                break
                         if first_record:
                             break
-                    if first_record:
-                        break
                 
                 if not first_record:
                     err_msg = f"No mapping records found for project_id={project_id}, workbook_id={workbook_id}, run_id={run_id}"

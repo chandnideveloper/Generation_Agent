@@ -151,38 +151,63 @@ if Config.MONGODB_URL:
                     route = "activities"
                 elif self.name == "logs":
                     route = "logs"
-                elif self.name == "generation":
+                elif self.name in ["generation", "generation_results"]:
                     route = "generation"
                 elif self.name == "settings":
                     route = "settings"
                     
                 url = f"{self.base_url}/api/records/{route}"
-                params = {}
+                
+                base_params = {}
+                candidate_variants = {}
                 for k, v in query.items():
                     if isinstance(v, (str, int, float, bool)):
-                        params[k] = v
+                        base_params[k] = str(v)
+                    elif isinstance(v, dict) and "$in" in v and isinstance(v["$in"], (list, tuple, set)):
+                        candidate_variants[k] = [str(x).strip() for x in v["$in"] if x is not None and str(x).strip()]
+                    elif isinstance(v, (list, tuple)):
+                        candidate_variants[k] = [str(x).strip() for x in v if x is not None and str(x).strip()]
+
+                if route == "mapping":
+                    base_params.setdefault("page_size", 1)
+
+                queries_to_try = []
+                if "run_id" in candidate_variants and candidate_variants["run_id"]:
+                    for r_val in candidate_variants["run_id"]:
+                        p = dict(base_params)
+                        p["run_id"] = r_val
+                        queries_to_try.append(p)
+                elif candidate_variants:
+                    for k, vals in candidate_variants.items():
+                        for val in vals:
+                            p = dict(base_params)
+                            p[k] = val
+                            queries_to_try.append(p)
+                else:
+                    queries_to_try.append(base_params)
                         
                 import asyncio
                 async with httpx.AsyncClient() as client:
-                    for attempt in range(4):
-                        try:
-                            resp = await client.get(url, params=params, timeout=15)
-                            if resp.status_code == 200:
-                                data = resp.json()
-                                if isinstance(data, list) and data:
-                                    return data[0]
-                                if isinstance(data, dict):
-                                    return data
-                                return None
-                            elif resp.status_code == 404:
-                                return None
-                            else:
-                                logger.warning(f"HTTP find_one for {self.name} returned {resp.status_code} on attempt {attempt+1}")
-                        except Exception as e:
-                            logger.warning(f"HTTP find_one error for {self.name} on attempt {attempt+1}: {e}")
-                        
-                        if attempt < 3:
-                            await asyncio.sleep(2 ** attempt)
+                    for params in queries_to_try:
+                        for attempt in range(2):
+                            try:
+                                resp = await client.get(url, params=params, timeout=45.0)
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    if isinstance(data, list) and data:
+                                        return data[0]
+                                    if isinstance(data, dict):
+                                        return data
+                                    break
+                                elif resp.status_code == 404:
+                                    break
+                                else:
+                                    logger.warning(f"HTTP find_one for {self.name} returned {resp.status_code} on attempt {attempt+1}")
+                            except Exception as e:
+                                logger.warning(f"HTTP find_one error for {self.name} on attempt {attempt+1}: {e}")
+                            
+                            if attempt < 1:
+                                await asyncio.sleep(1.0)
                 return None
 
             async def insert_one(self, document):
@@ -195,15 +220,15 @@ if Config.MONGODB_URL:
                     route = "activities"
                 elif self.name == "logs":
                     route = "logs"
-                elif self.name == "generation":
+                elif self.name in ["generation", "generation_results"]:
                     route = "generation"
                     
                 url = f"{self.base_url}/api/records/{route}"
                 import asyncio
                 async with httpx.AsyncClient() as client:
-                    for attempt in range(4):
+                    for attempt in range(2):
                         try:
-                            resp = await client.post(url, json=document, timeout=15)
+                            resp = await client.post(url, json=document, timeout=30.0)
                             if resp.status_code in (200, 201):
                                 return resp.json()
                             else:
@@ -211,9 +236,68 @@ if Config.MONGODB_URL:
                         except Exception as e:
                             logger.warning(f"HTTP insert_one error for {self.name} on attempt {attempt+1}: {e}")
                             
-                        if attempt < 3:
-                            await asyncio.sleep(2 ** attempt)
+                        if attempt < 1:
+                            await asyncio.sleep(1.0)
                     return None
+
+            async def update_one(self, filter_query, update_doc, upsert=False):
+                route = self.name.replace('_', '-')
+                if self.name in ["mapping", "mapping_results"]:
+                    route = "mapping"
+                elif self.name == "data_layer_results":
+                    route = "data-layer"
+                elif self.name in ["generation", "generation_results"]:
+                    route = "generation"
+                elif self.name == "settings":
+                    route = "settings"
+                
+                url = f"{self.base_url}/api/records/{route}"
+                params = {}
+                for k, v in filter_query.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        params[k] = str(v)
+                
+                payload = update_doc.get("$set", update_doc) if isinstance(update_doc, dict) else update_doc
+                if not isinstance(payload, dict):
+                    payload = {"payload": payload}
+
+                import asyncio
+                async with httpx.AsyncClient() as client:
+                    try:
+                        resp = await client.patch(url, params=params, json=payload, timeout=30.0)
+                        if resp.status_code in (200, 204):
+                            return type("UpdateResult", (), {"matched_count": 1, "modified_count": 1, "upserted_id": None})()
+                        elif resp.status_code == 404 and upsert:
+                            post_payload = {**params, **payload}
+                            p_resp = await client.post(url, json=post_payload, timeout=30.0)
+                            if p_resp.status_code in (200, 201):
+                                return type("UpdateResult", (), {"matched_count": 0, "modified_count": 1, "upserted_id": params.get("run_id")})()
+                            else:
+                                logger.warning(f"HTTP update_one upsert failed ({p_resp.status_code}): {p_resp.text[:100]}")
+                        else:
+                            logger.warning(f"HTTP update_one PATCH returned {resp.status_code}: {resp.text[:100]}")
+                    except Exception as e:
+                        logger.warning(f"HTTP update_one error for {self.name}: {e}")
+                return type("UpdateResult", (), {"matched_count": 0, "modified_count": 0, "upserted_id": None})()
+
+            async def delete_many(self, filter_query):
+                route = self.name.replace('_', '-')
+                if self.name in ["generation", "generation_results"]:
+                    route = "generation"
+                url = f"{self.base_url}/api/records/{route}"
+                params = {}
+                for k, v in filter_query.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        params[k] = str(v)
+                import asyncio
+                async with httpx.AsyncClient() as client:
+                    try:
+                        resp = await client.delete(url, params=params, timeout=15.0)
+                        if resp.status_code in (200, 204):
+                            return type("DeleteResult", (), {"deleted_count": 1})()
+                    except Exception as e:
+                        logger.warning(f"HTTP delete_many error for {self.name}: {e}")
+                return type("DeleteResult", (), {"deleted_count": 0})()
                         
         class HTTPDatabase:
             def __init__(self, base_url, db_name="db"):
