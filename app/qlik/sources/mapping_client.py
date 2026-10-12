@@ -50,16 +50,24 @@ def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Option
     document that states no id at all is accepted, since older records were
     written without one.
     """
-    mapping = row.get("mapping_result") if isinstance(row.get("mapping_result"), dict) else row
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    mapping = row.get("mapping_result") if isinstance(row.get("mapping_result"), dict) else (payload or row)
     metadata = mapping.get("workbook_metadata") if isinstance(mapping.get("workbook_metadata"), dict) else {}
 
     def _candidates(key: str) -> set:
         found = set()
-        for source in (row, mapping, metadata):
+        for source in (row, payload, mapping, metadata):
             value = source.get(key)
             if value is not None and str(value).strip():
                 found.add(str(value).strip())
         return found
+
+    # If run_id is supplied and matches, this is definitively the run
+    run_stated = _candidates("run_id")
+    if run_id and run_stated:
+        norm_run_stated = {_norm(s) for s in run_stated}
+        if _norm(run_id) in norm_run_stated:
+            return True
 
     for requested, key in ((run_id, "run_id"), (app_id, "app_id"), (space_id, "space_id")):
         if not requested:
@@ -81,7 +89,12 @@ def _bases() -> List[str]:
     unrelated run happens to be newest on it.
     """
     extra = [b.strip() for b in os.getenv("MAPPING_API_FALLBACKS", "").split(",") if b.strip()]
-    candidates = [config.MONGO_API_URL, os.getenv("MAPPING_LOCAL_API", "http://127.0.0.1:8008"), *extra]
+    candidates = [
+        config.MONGO_API_URL,
+        os.getenv("MONGODB_URL"),
+        os.getenv("MAPPING_LOCAL_API"),
+        *extra,
+    ]
 
     clean: List[str] = []
     for base in candidates:
@@ -137,31 +150,26 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str], space_id: Option
         except Exception as e:
             logger.warning(f"Direct MongoDB fetch failed: {e}")
 
-    def _id_variants(val: str) -> List[str]:
-        raw = val.strip()
-        v = [raw]
-        hyphenated = re.sub(r"[\s_]+", "-", raw)
-        spaced = re.sub(r"[-_]+", " ", raw)
-        if hyphenated not in v:
-            v.append(hyphenated)
-        if spaced not in v:
-            v.append(spaced)
-        return v
-
     paths = []
     if run_id:
         for r in _id_variants(run_id):
             paths.extend([
-                f"/mapping/by-run/{r}",
+                f"/api/records/mapping?run_id={r}",
+                f"/records/mapping?run_id={r}",
                 f"/api/mapping/by-run/{r}",
+                f"/mapping/by-run/{r}",
                 f"/api/mapping/{r}",
+                f"/mapping/{r}",
             ])
     if app_id:
         for a in _id_variants(app_id):
             paths.extend([
-                f"/mapping/by-app/{a}",
+                f"/api/records/mapping?app_id={a}",
+                f"/records/mapping?app_id={a}",
                 f"/api/mapping/by-app/{a}",
+                f"/mapping/by-app/{a}",
                 f"/api/mapping/{a}",
+                f"/mapping/{a}",
             ])
 
     rejected = 0
@@ -188,8 +196,19 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str], space_id: Option
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                mapping = row.get("mapping_result")
-                has_mapping = (isinstance(mapping, dict) and bool(mapping)) or bool(row.get("tables"))
+                mapping = (
+                    row.get("mapping_result")
+                    if isinstance(row.get("mapping_result"), dict) and row.get("mapping_result")
+                    else (row.get("payload") if isinstance(row.get("payload"), dict) and row.get("payload") else row)
+                )
+                m_dict = mapping if isinstance(mapping, dict) else row
+                has_mapping = (
+                    bool(m_dict.get("tables"))
+                    or bool(m_dict.get("measures"))
+                    or bool(m_dict.get("visuals"))
+                    or (isinstance(row.get("mapping_result"), dict) and bool(row.get("mapping_result")))
+                    or (isinstance(row.get("payload"), dict) and bool(row.get("payload")))
+                )
                 if not has_mapping:
                     continue
                 if not _identity_matches(row, app_id, run_id, space_id):
@@ -199,7 +218,6 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str], space_id: Option
                         "app_id=%r run_id=%r space_id=%r.", url, app_id, run_id, space_id,
                     )
                     continue
-                m_dict = mapping if isinstance(mapping, dict) else row
                 score = (
                     len(m_dict.get("tables") or []) * 10
                     + len(m_dict.get("measures") or []) * 5

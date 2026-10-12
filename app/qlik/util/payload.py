@@ -30,6 +30,8 @@ def unwrap_mapping(document: Any) -> Dict[str, Any]:
     res = doc
     if isinstance(doc.get("mapping_result"), dict) and doc["mapping_result"]:
         res = dict(doc["mapping_result"])
+    elif isinstance(doc.get("payload"), dict) and doc["payload"]:
+        res = dict(doc["payload"])
     elif isinstance(doc.get("parsing_result"), dict) and doc["parsing_result"]:
         res = dict(doc["parsing_result"])
 
@@ -235,7 +237,7 @@ def app_identity(mapping: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "app_id": meta.get("app_id") or mapping.get("app_id"),
         "app_name": text(
-            meta.get("app_name") or app_meta.get("app_name") or mapping.get("app_name"),
+            meta.get("app_name") or app_meta.get("app_name") or mapping.get("app_name") or mapping.get("project_name"),
             "Qlik App",
         ),
         "run_id": meta.get("run_id") or mapping.get("run_id"),
