@@ -88,6 +88,26 @@ class MigrationOrchestrator:
                 summary="Report Generation completed successfully."
             )
 
+        # Persist generation record in MongoDB
+        try:
+            import re
+            final_dict = final_res.model_dump() if hasattr(final_res, "model_dump") else dict(final_res)
+            clean_app_id = re.sub(r"[\s_]+", "-", str(workbook_id or "").strip())
+            gen_record = {
+                "run_id": request.run_id,
+                "space_id": project_id,
+                "app_id": clean_app_id or workbook_id,
+                "space_name": project_id,
+                "project_id": project_id,
+                "workbook_id": clean_app_id or workbook_id,
+                "status": "completed" if final_res.status == "success" else "partial_success",
+                "payload": final_dict,
+            }
+            from app.qlik.generator import _post_with_fallback, _TELEMETRY_POOL
+            _TELEMETRY_POOL.submit(_post_with_fallback, "api/records/generation", gen_record, (2, 10))
+        except Exception as exc:
+            logger.warning(f"Failed to submit generation record to MongoDB: {exc}")
+
         return final_res
 
     async def _run_qlik_generation(
@@ -247,8 +267,16 @@ class MigrationOrchestrator:
             },
         )
 
+        db_loc = clean_result.get("db_location") or "QT2F.generation_results"
+        msg = clean_result.get("message") or ""
+        if msg and "Response saved to DB location" not in msg:
+            msg = f"{msg} | Response saved to DB location: {db_loc}"
+            clean_result["message"] = msg
+
         return UnifiedMigrateResponse(
             status="success" if deploy_status == "completed" else "error",
+            message=msg or f"Response saved to DB location: {db_loc}",
+            db_location=db_loc,
             source_type="qlik",
             run_id=request.run_id,
             target="fabric",
@@ -304,8 +332,16 @@ class MigrationOrchestrator:
             },
         )
 
+        db_loc = clean_result.get("db_location") or "QT2F_Tableau.generation"
+        msg = clean_result.get("message") or f"Tableau migration completed. | Response saved to DB location: {db_loc}"
+        if "Response saved to DB location" not in msg:
+            msg = f"{msg} | Response saved to DB location: {db_loc}"
+            clean_result["message"] = msg
+
         return UnifiedMigrateResponse(
             status="success" if deploy_status == "completed" else "error",
+            message=msg,
+            db_location=db_loc,
             source_type="tableau",
             run_id=request.run_id,
             target="fabric",

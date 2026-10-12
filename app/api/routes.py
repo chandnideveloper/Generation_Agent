@@ -77,48 +77,66 @@ async def get_migration_status(
             content={"status": "error", "message": "Please provide at least one query parameter (run_id, project_id, etc.)"}
         )
 
-    try:
-        # Check the 'generation' collection (Unified/Tableau URL)
-        record = await mongo_db["generation"].find_one(query, sort=[('_id', -1)])
-        if record:
-            if "_id" in record:
-                record["_id"] = str(record["_id"])
-            return JSONResponse(status_code=200, content=record)
+    import re
+    # Clean and normalize IDs
+    clean_app_id = re.sub(r"[\s_]+", "-", app_id.strip()) if app_id else None
+    clean_wb_id = re.sub(r"[\s_]+", "-", workbook_id.strip()) if workbook_id else None
+    eff_app_id = clean_app_id or clean_wb_id or (app_id.strip() if app_id else (workbook_id.strip() if workbook_id else None))
+    eff_space_id = (space_id.strip() if space_id else (project_id.strip() if project_id else None))
+    eff_run_id = run_id.strip() if run_id else None
 
-        # Fallback to Qlik URL
+    try:
         import httpx
         from app.qlik.config import config as qlik_config
+
+        # 1. Try Qlik MongoDB Microservice
         if qlik_config.MONGO_API_URL:
-            # We try querying the exact endpoints the Qlik proxy might expose
-            params = query
-            
+            qlik_base = qlik_config.MONGO_API_URL.rstrip('/')
+            qlik_url = f"{qlik_base}/api/records/generation"
+
+            # Prepare param candidates (with normalized app_id, default space_id, etc.)
+            candidate_params = []
+            if eff_run_id:
+                candidate_params.append({
+                    "space_id": eff_space_id or "personal",
+                    "app_id": eff_app_id or "926e0fd3-a729-41af-91b8-4f9e9787d7da",
+                    "run_id": eff_run_id,
+                })
+                if app_id and app_id.strip() != eff_app_id:
+                    candidate_params.append({
+                        "space_id": eff_space_id or "personal",
+                        "app_id": app_id.strip(),
+                        "run_id": eff_run_id,
+                    })
+
             async with httpx.AsyncClient() as client:
-                qlik_base = qlik_config.MONGO_API_URL.rstrip('/')
-                # Check /api/records/report-generation
-                qlik_url = f"{qlik_base}/api/records/report-generation"
-                try:
-                    resp = await client.get(qlik_url, params=params, timeout=5)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if isinstance(data, list) and data:
-                            return JSONResponse(status_code=200, content=data[0])
-                        elif isinstance(data, dict):
-                            return JSONResponse(status_code=200, content=data)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch from Qlik link /api/records/report-generation: {e}")
-                
-                # Check /report-generation
-                qlik_url_alt = f"{qlik_base}/report-generation"
-                try:
-                    resp = await client.get(qlik_url_alt, params=params, timeout=5)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if isinstance(data, list) and data:
-                            return JSONResponse(status_code=200, content=data[0])
-                        elif isinstance(data, dict):
-                            return JSONResponse(status_code=200, content=data)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch from Qlik link /report-generation: {e}")
+                for p in candidate_params:
+                    try:
+                        resp = await client.get(qlik_url, params=p, timeout=15)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data:
+                                if isinstance(data, list):
+                                    return JSONResponse(status_code=200, content=data[0])
+                                return JSONResponse(status_code=200, content=data)
+                    except Exception as e:
+                        logger.warning(f"Error querying Qlik generation records with {p}: {e}")
+
+        # 2. Try Tableau MongoDB (mongo_db['generation'])
+        if mongo_db is not None:
+            tb_query = {}
+            if eff_run_id:
+                tb_query["run_id"] = eff_run_id
+            if eff_space_id:
+                tb_query["project_id"] = eff_space_id
+            if eff_app_id:
+                tb_query["workbook_id"] = eff_app_id
+
+            record = await mongo_db["generation"].find_one(tb_query, sort=[('_id', -1)])
+            if record:
+                if "_id" in record:
+                    record["_id"] = str(record["_id"])
+                return JSONResponse(status_code=200, content=record)
 
         return JSONResponse(
             status_code=404,

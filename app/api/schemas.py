@@ -131,6 +131,8 @@ class ArtifactsSummary(BaseModel):
 
 class UnifiedMigrateResponse(BaseModel):
     status: Literal["success", "error"] = "success"
+    message: Optional[str] = None
+    db_location: Optional[str] = None
     source_type: Literal["qlik", "tableau"]
     run_id: str
     target: Literal["fabric"] = "fabric"

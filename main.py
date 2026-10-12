@@ -60,4 +60,5 @@ if __name__ == "__main__":
     print(f" Starting Unified Generation Agent on http://0.0.0.0:{port}")
     print(f" Single service - Qlik and Tableau generation in one process")
     print(f"============================================================")
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    reload_flag = os.getenv("RELOAD", "true").lower() == "true"
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload_flag)

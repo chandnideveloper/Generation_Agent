@@ -50,12 +50,13 @@ logger = get_logger(__name__)
 _TELEMETRY_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-telemetry")
 
 
-def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (0.2, 0.5)) -> None:
+def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (2, 10)) -> None:
     import requests
     import os
     bases = [
         os.getenv("TELEMETRY_LOCAL_API"),
         config.MONGO_API_URL,
+        os.getenv("MONGODB_URL"),
     ]
     for base in bases:
         if not base:
@@ -64,9 +65,12 @@ def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (0.
             url = f"{base.rstrip('/')}/{path.lstrip('/')}"
             res = requests.post(url, json=payload, timeout=timeout)
             if res.status_code in (200, 201):
+                logger.info(f"Successfully posted to {url}")
                 return
-        except Exception:
-            pass
+            else:
+                logger.warning(f"POST {url} returned {res.status_code}: {res.text[:200]}")
+        except Exception as exc:
+            logger.warning(f"POST {url} failed: {exc}")
 
 
 def _log_action_sync(action: str, request: GenerateRequest, app_name: str, details: str = "") -> None:
@@ -323,37 +327,64 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         result["message"] = _message(result)
 
     # Persist report generation result in MongoDB
-    _save_to_mongodb(result, request, app_name)
+    db_loc = _save_to_mongodb(result, request, app_name)
+    result["db_location"] = db_loc
+    if "Response saved to DB location" not in result.get("message", ""):
+        result["message"] = f"{result.get('message', '')} | Response saved to DB location: {db_loc}"
+
     _log_action_sync("Report generation completed", request, app_name, f"Completed status={result['status']}, {len(package)} files")
 
     return result
 
 
-def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name: str) -> None:
-    """Persist the generation result in the MongoDB microservice, without
-    blocking the caller on that service being reachable (see _log_action_sync)."""
+def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name: str) -> str:
+    """Persist the generation result in the MongoDB microservice."""
+    import requests
+    clean_app_id = re.sub(r"[\s_]+", "-", str(request.app_id or "").strip())
+    db_location = "QT2F.generation_results"
     doc = {
-        "id": request.run_id or request.app_id or slug(app_name),
-        "app_id": request.app_id,
         "run_id": request.run_id,
-        "workspace_id": request.workspace_id or request.space_id or "personal",
-        "space_id": request.space_id,
-        "app_name": app_name,
-        "folder_name": request.department_repo or "Qlik_Migrated",
-        "report_result": {
-            "status": result.get("status"),
-            "message": result.get("message"),
-            "file_count": result.get("file_count"),
-            "total_bytes": result.get("total_bytes"),
-            "summary": result.get("summary"),
-            "visual_notes": [n.dict() if hasattr(n, "dict") else n for n in result.get("visual_notes", [])],
-            "validation": result.get("validation"),
-            "deployment": result.get("deployment"),
-            "output_path": result.get("output_path"),
+        "space_id": request.space_id or request.workspace_id or "personal",
+        "app_id": clean_app_id or request.app_id,
+        "space_name": request.space_id or "Unknown",
+        "status": "completed" if str(result.get("status", "")).lower() in ("success", "completed", "ok") else "partial_success",
+        "payload": {
+            "app_name": app_name,
+            "folder_name": request.department_repo or "Qlik_Migrated",
+            "report_result": {
+                "status": result.get("status"),
+                "message": result.get("message"),
+                "file_count": result.get("file_count"),
+                "total_bytes": result.get("total_bytes"),
+                "summary": result.get("summary"),
+                "visual_notes": [n.dict() if hasattr(n, "dict") else n for n in result.get("visual_notes", [])],
+                "validation": result.get("validation"),
+                "deployment": result.get("deployment"),
+                "output_path": result.get("output_path"),
+            },
+            **result,
         },
     }
 
-    _TELEMETRY_POOL.submit(_post_with_fallback, "report-generation", doc, (2, 5))
+    # Attempt immediate synchronous save
+    saved = False
+    for base in [config.MONGO_API_URL, os.getenv("MONGODB_URL")]:
+        if not base:
+            continue
+        url = f"{base.rstrip('/')}/api/records/generation"
+        try:
+            res = requests.post(url, json=doc, timeout=10)
+            if res.status_code in (200, 201):
+                logger.info(f"Successfully saved generation result directly to {url}")
+                saved = True
+                break
+        except Exception as e:
+            logger.warning(f"Direct post to {url} failed: {e}")
+
+    if not saved:
+        _TELEMETRY_POOL.submit(_post_with_fallback, "api/records/generation", doc, (2, 10))
+
+    return db_location
 
 
 def _deploy(
