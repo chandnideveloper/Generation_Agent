@@ -154,8 +154,18 @@ async def get_migration_status(
     "/api/records/activities",
     summary="Get agent actions / activities trail for a given run_id",
 )
+@router.get(
+    "/activities",
+    summary="Alias for /api/records/activities",
+)
+@router.get(
+    "/api/records/activities/qlik",
+    summary="Alias for Qlik agent activities",
+)
 async def get_agent_activities(
-    run_id: str,
+    run_id: Optional[str] = None,
+    space_id: Optional[str] = None,
+    app_id: Optional[str] = None,
 ):
     if not run_id:
         return JSONResponse(
@@ -164,15 +174,33 @@ async def get_agent_activities(
         )
 
     import os
+    # 1. First check MongoDB directly
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+    if mongo_uri and mongo_uri.startswith("mongodb"):
+        try:
+            import pymongo
+            client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+            for db_name in ["QT2F", "QT2F_Tableau"]:
+                coll = client[db_name]["activities"]
+                docs = list(coll.find({"run_id": run_id.strip()}).sort("_id", -1))
+                if docs:
+                    for d in docs:
+                        if "_id" in d:
+                            d["_id"] = str(d["_id"])
+                    return JSONResponse(status_code=200, content=docs)
+        except Exception as err:
+            logger.warning(f"Direct MongoDB query for activities failed: {err}")
+
+    # 2. Check remote microservice
     import httpx
     from app.qlik.config import config as qlik_config
     bases = [
         qlik_config.MONGO_API_URL,
-        os.getenv("MONGODB_URL"),
+        os.getenv("TELEMETRY_LOCAL_API"),
     ]
 
     for base in bases:
-        if not base:
+        if not base or not base.startswith("http"):
             continue
         url = f"{base.rstrip('/')}/api/records/activities"
         try:
@@ -188,6 +216,7 @@ async def get_agent_activities(
         status_code=404,
         content={"status": "error", "message": f"No activities found for run_id={run_id}"}
     )
+
 
 
 @router.post(
