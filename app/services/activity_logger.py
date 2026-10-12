@@ -16,9 +16,9 @@ def get_mongo_api_url() -> str:
     url = os.getenv("MONGO_API_URL", "http://127.0.0.1:8008")
     return url.rstrip("/")
 
-async def log_activity_async(run_id: str, project_id: str, workbook_id: str, summary: str) -> None:
+async def log_activity_async(run_id: str, project_id: str, workbook_id: str, summary: str, status: str = "running") -> None:
     """
-    Log an agent action to the central MongoDB Activity API asynchronously.
+    Log an agent action to the central MongoDB Activity API asynchronously and directly to MongoDB.
     """
     if not run_id:
         run_id = "unknown"
@@ -29,23 +29,47 @@ async def log_activity_async(run_id: str, project_id: str, workbook_id: str, sum
         
     payload = {
         "run_id": run_id,
-        "agent_name": "Report Generation",
+        "run_no": run_id,
+        "agent_name": "Generation Agent",
         "activity_summary": summary,
-        "status": "running",
+        "action": summary,
+        "status": status,
         "project_id": project_id,
-        "workbook_id": workbook_id
+        "space_id": project_id,
+        "workbook_id": workbook_id,
+        "app_id": workbook_id,
+        "type": "agent_activity",
     }
     
-    url = f"{get_mongo_api_url()}/activities"
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=5.0)
-            response.raise_for_status()
-    except Exception as e:
-        logger.error(f"[ActivityLogger] Failed to log async activity to {url}: {e}")
+    # 1. Direct MongoDB insertion if MONGODB_URL is available
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+    if mongo_uri and mongo_uri.startswith("mongodb"):
+        try:
+            import pymongo
+            client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+            for db_name in ["QT2F", "QT2F_Tableau"]:
+                try:
+                    client[db_name]["activities"].insert_one(dict(payload))
+                except Exception:
+                    pass
+        except Exception as err:
+            logger.debug(f"[ActivityLogger] Direct MongoDB insert failed: {err}")
 
-def log_activity_sync(run_id: str, project_id: str, workbook_id: str, summary: str) -> None:
+    # 2. HTTP POST fallback to /api/records/activities
+    for base in [get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
+        if not base or not base.startswith("http"):
+            continue
+        for endpoint in ["/api/records/activities", "/activities"]:
+            url = f"{base.rstrip('/')}{endpoint}"
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, json=payload, timeout=3.0)
+                    if response.status_code in (200, 201):
+                        return
+            except Exception as e:
+                logger.debug(f"[ActivityLogger] Failed to log async activity to {url}: {e}")
+
+def log_activity_sync(run_id: str, project_id: str, workbook_id: str, summary: str, status: str = "running") -> None:
     """
     Log an agent action to the central MongoDB Activity API synchronously (fire-and-forget).
     """
@@ -58,20 +82,42 @@ def log_activity_sync(run_id: str, project_id: str, workbook_id: str, summary: s
         
     payload = {
         "run_id": run_id,
-        "agent_name": "Report Generation",
+        "run_no": run_id,
+        "agent_name": "Generation Agent",
         "activity_summary": summary,
-        "status": "running",
+        "action": summary,
+        "status": status,
         "project_id": project_id,
-        "workbook_id": workbook_id
+        "space_id": project_id,
+        "workbook_id": workbook_id,
+        "app_id": workbook_id,
+        "type": "agent_activity",
     }
     
-    url = f"{get_mongo_api_url()}/activities"
-    
     def _do_post():
-        try:
-            res = requests.post(url, json=payload, timeout=(1, 3))
-            res.raise_for_status()
-        except Exception as e:
-            logger.error(f"[ActivityLogger] Failed to log sync activity to {url}: {e}")
+        mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+        if mongo_uri and mongo_uri.startswith("mongodb"):
+            try:
+                import pymongo
+                client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+                for db_name in ["QT2F", "QT2F_Tableau"]:
+                    try:
+                        client[db_name]["activities"].insert_one(dict(payload))
+                    except Exception:
+                        pass
+            except Exception as err:
+                logger.debug(f"[ActivityLogger] Direct MongoDB insert failed: {err}")
+
+        for base in [get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
+            if not base or not base.startswith("http"):
+                continue
+            for endpoint in ["/api/records/activities", "/activities"]:
+                url = f"{base.rstrip('/')}{endpoint}"
+                try:
+                    res = requests.post(url, json=payload, timeout=(1, 3))
+                    if res.status_code in (200, 201):
+                        return
+                except Exception as e:
+                    logger.debug(f"[ActivityLogger] Failed to log sync activity to {url}: {e}")
             
     _TELEMETRY_POOL.submit(_do_post)

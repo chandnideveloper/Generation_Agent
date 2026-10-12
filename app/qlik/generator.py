@@ -74,28 +74,13 @@ def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (2,
 
 
 def _log_action_sync(action: str, request: GenerateRequest, app_name: str, details: str = "") -> None:
-    """Record one agent action for the run's activity trail, without
-    blocking generation on the logging endpoint being reachable."""
+    """Record one agent action for the run's activity trail."""
+    from app.services.activity_logger import log_activity_sync
     run_id = request.run_id or "unknown"
     workspace_id = request.workspace_id or request.space_id or "personal"
     app_id = request.app_id or "unknown"
-    payload = {
-        "agent_name": "Generation Agent",
-        "activity_summary": action,
-        "action": action,
-        "details": details or action,
-        "run_id": run_id,
-        "run_no": run_id,
-        "correlation_id": run_id,
-        "app_id": app_id,
-        "workbook_id": app_id,
-        "workspace_id": workspace_id,
-        "project_id": workspace_id,
-        "project_name": app_name or "Unknown",
-        "type": "agent_activity",
-        "status": "success",
-    }
-    _TELEMETRY_POOL.submit(_post_with_fallback, "agent-actions", payload, (1, 3))
+    log_activity_sync(run_id, workspace_id, app_id, action, status="success")
+
 
 
 def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict[str, Any]:
