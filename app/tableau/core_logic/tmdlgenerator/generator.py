@@ -646,19 +646,27 @@ class TmdlGenerator(TmdlHelperMixin):
                         table_conn_info = next(iter(datasource_map.values()), {})
 
                 # Measures: distribute to the table referenced in the DAX formula
-                tbl_measures = measures_map.get(t_name, [])
+                tbl_measures = list(measures_map.get(t_name, []))
                 
-                # Append LOD expressions as DAX measures for this table
+                # Append LOD expressions as DAX measures for this table (deduplicated)
                 lod_for_table = lod_measures_map.get(t_name, [])
                 if lod_for_table:
-                    tbl_measures = tbl_measures + lod_for_table
-                    log_info(f"Added {len(lod_for_table)} LOD measures to table '{t_name}'")
+                    existing_names = {self._sanitize_name(m.get('name', '')).lower() for m in tbl_measures if isinstance(m, dict)}
+                    for lm in lod_for_table:
+                        if isinstance(lm, dict) and self._sanitize_name(lm.get('name', '')).lower() not in existing_names:
+                            tbl_measures.append(lm)
+                            existing_names.add(self._sanitize_name(lm.get('name', '')).lower())
+                    log_info(f"Added LOD measures to table '{t_name}'")
 
-                # Extra measures from 'Calculated Fields & LODs' (type=measure)
+                # Extra measures from 'Calculated Fields & LODs' (type=measure) (deduplicated)
                 extra_m_for_table = extra_measures_map.get(t_name, [])
                 if extra_m_for_table:
-                    tbl_measures = tbl_measures + extra_m_for_table
-                    log_info(f"Added {len(extra_m_for_table)} extra measures from calculated fields to table '{t_name}'")
+                    existing_names = {self._sanitize_name(m.get('name', '')).lower() for m in tbl_measures if isinstance(m, dict)}
+                    for em in extra_m_for_table:
+                        if isinstance(em, dict) and self._sanitize_name(em.get('name', '')).lower() not in existing_names:
+                            tbl_measures.append(em)
+                            existing_names.add(self._sanitize_name(em.get('name', '')).lower())
+                    log_info(f"Added extra measures from calculated fields to table '{t_name}'")
 
                 # Calculated columns: from sets + calculated_fields + calc_fields_from_lods per table
                 tbl_specific_calcs = list(table_calcs_map.get(t_name, []))

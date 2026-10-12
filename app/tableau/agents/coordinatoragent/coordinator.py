@@ -296,10 +296,24 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                     
                 outer_payload = first_record.get("mapping_result") or first_record.get("payload", {})
 
-                raw_project_name = (outer_payload.get("workbook_metadata") or {}).get("name") or \
-                                   first_record.get("project_name") or \
-                                   (outer_payload.get("metadata") or {}).get("project_name") or \
-                                   "Unknown_Project"
+                inner_p = outer_payload.get("payload", {}) if isinstance(outer_payload.get("payload"), dict) else {}
+                raw_project_name = (
+                    (outer_payload.get("workbook_metadata") or {}).get("name")
+                    or (inner_p.get("workbook_metadata") or {}).get("name")
+                    or outer_payload.get("project_name")
+                    or inner_p.get("project_name")
+                    or outer_payload.get("workbook_name")
+                    or inner_p.get("workbook_name")
+                    or outer_payload.get("app_name")
+                    or inner_p.get("app_name")
+                    or first_record.get("project_name")
+                    or first_record.get("workbook_name")
+                    or first_record.get("app_name")
+                    or (outer_payload.get("metadata") or {}).get("project_name")
+                    or (inner_p.get("metadata") or {}).get("project_name")
+                    or getattr(request, "folder_name", None)
+                    or "Unknown_Project"
+                )
                 cleaned_name = re.sub(r'[^a-zA-Z0-9_\s]', '', raw_project_name)
                 cleaned_name = cleaned_name.replace(" ", "_")
                 sanitized_name = re.sub(r'_+', '_', cleaned_name).strip("_")

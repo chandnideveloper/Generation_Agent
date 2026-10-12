@@ -490,8 +490,12 @@ class TmdlHelperMixin:
                     lines.extend(["", "        summarizeBy: none", ""])
 
         if extra_measures:
+            seen_measure_names = set()
             for meas in extra_measures:
                 m_name = self._sanitize_name(meas.get('name'))
+                if not m_name or m_name.lower() in seen_measure_names:
+                    continue
+                seen_measure_names.add(m_name.lower())
                 raw_dax = meas.get('dax_formula') or meas.get('powerbi_formula')
                 dax = self._clean_dax(raw_dax) or "BLANK()"
                 

@@ -943,8 +943,12 @@ class TmdlGenerator:
                     lines.append("") 
         # 3. Measures
         if extra_measures:
+            seen_measure_names = set()
             for meas in extra_measures:
                 m_name = self._sanitize_name(meas.get('name'))
+                if not m_name or m_name.lower() in seen_measure_names:
+                    continue
+                seen_measure_names.add(m_name.lower())
                 raw_dax = meas.get('dax_formula') or meas.get('powerbi_formula')
                 dax = self._clean_dax(raw_dax, is_measure=True, table_to_cols=table_to_cols, display_to_qualified=display_to_qualified) or "BLANK()"
                 
