@@ -149,7 +149,7 @@ if Config.MONGODB_URL:
                     route = "data-layer"
                 elif self.name == "activities":
                     route = "activities"
-                elif self.name == "logs":
+                elif self.name in ["logs", "agent_logs"]:
                     route = "logs"
                 elif self.name in ["generation", "generation_results"]:
                     route = "generation"
@@ -218,7 +218,7 @@ if Config.MONGODB_URL:
                     route = "data-layer"
                 elif self.name == "activities":
                     route = "activities"
-                elif self.name == "logs":
+                elif self.name in ["logs", "agent_logs"]:
                     route = "logs"
                 elif self.name in ["generation", "generation_results"]:
                     route = "generation"

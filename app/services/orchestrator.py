@@ -123,9 +123,20 @@ class MigrationOrchestrator:
         app_id = source.get("app_id")
         run_id = request.run_id
         target_dir = gh.target_directory
+        space_id = source.get("space_id") or "personal"
+        project_name = source.get("project_name") or source.get("folder_name") or app_id or "Qlik_App"
+
+        # Initialize Qlik logging context so all logs flow to QT2F.agent_logs
+        from app.qlik.util.logging_utils import set_qlik_logging_context, log_qlik_info
+        set_qlik_logging_context(
+            run_id=run_id,
+            space_id=space_id,
+            app_id=app_id,
+            project_name=project_name,
+        )
+        log_qlik_info(f"[Qlik] Initiated migration workflow for app '{app_id}' (run_id: {run_id})")
 
         # 1. Resolve mapping document
-        space_id = source.get("space_id")
         if request.mapping_result:
             document = request.mapping_result
         else:

@@ -19,15 +19,18 @@ class TmdlRequest(BaseModel):
     mapping_result: Optional[Dict[str, Any]] = None
 
 class CosmosLogRecord(BaseModel):
-    project_name: str
-    project_id: str
+    id: Optional[str] = None
+    project_name: Optional[str] = None
+    project_id: Optional[str] = None
     run_id: str
-    workbook_id: str
+    run_no: Optional[str] = None
+    workbook_id: Optional[str] = None
     agent_name: str = "Generation Agent"
     log_level: str
     message: str
     timestamp: str
     details: Dict[str, Any] = Field(default_factory=dict)
+    type: str = "agent_log"
 
 class CosmosActivityRecord(BaseModel):
     id: str

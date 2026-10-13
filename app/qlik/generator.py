@@ -74,13 +74,14 @@ def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (2,
 
 
 def _log_action_sync(action: str, request: GenerateRequest, app_name: str, details: str = "") -> None:
-    """Record one agent action for the run's activity trail."""
+    """Record one agent action for the run's activity trail and QT2F.agent_logs."""
     from app.services.activity_logger import log_activity_sync
+    from app.qlik.util.logging_utils import log_qlik_info
     run_id = request.run_id or "unknown"
     workspace_id = request.workspace_id or request.space_id or "personal"
     app_id = request.app_id or "unknown"
     log_activity_sync(run_id, workspace_id, app_id, action, status="success")
-
+    log_qlik_info(f"ACTION: {action} | {details}", details={"action": action, "app_name": app_name, "info": details})
 
 
 def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict[str, Any]:
@@ -104,6 +105,15 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         or identity.get("run_id")
         or f"run-{ts_str}-{uuid.uuid4().hex[:6]}"
     )
+
+    from app.qlik.util.logging_utils import set_qlik_logging_context, log_qlik_info
+    set_qlik_logging_context(
+        run_id=run_id,
+        space_id=request.space_id or request.workspace_id or "personal",
+        app_id=request.app_id or "unknown",
+        project_name=app_name,
+    )
+    log_qlik_info(f"Starting Qlik to Fabric PBIP/TMDL generation for '{app_name}' (run_id: {run_id})")
 
     from app.services.activity_logger import log_activity_sync
     log_activity_sync(

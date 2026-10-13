@@ -1,8 +1,12 @@
-"""API logger client for Generation Agent."""
+"""API logger client for Qlik Generation Agent."""
 
+import datetime
 import logging
+import os
+import uuid
 import aiohttp
 from app.qlik.config import Config
+from app.qlik.util.logging_utils import fire_and_forget_qlik_log
 
 logger = logging.getLogger(__name__)
 
@@ -16,34 +20,41 @@ async def log_action_to_api(
     project_name: str = None,
     token: str = None,
 ) -> None:
-    """Log an agent action to the external monitoring API."""
-    cfg = Config()
-    mongo_url = cfg.MONGO_API_URL or "http://127.0.0.1:8008"
-    url = f"{mongo_url.rstrip('/')}/agent-actions"
-    data = {
-        "agent_name": "Generation Agent",
-        "activity_summary": action_desc,
-        "action": action_desc,
-        "details": details or (f"Processing app {app_id}" if app_id else "General generation action"),
-        "correlation_id": run_id or app_id or "unknown",
-        "run_id": run_id or "",
-        "run_no": run_id or "",
-        "app_id": app_id or "",
-        "workbook_id": app_id or "",
-        "workspace_id": workspace_id or "personal",
-        "project_id": workspace_id or "personal",
-        "project_name": project_name or "Unknown",
-        "type": "agent_activity",
-        "status": "success",
-    }
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    """Log an agent action to the external monitoring API and QT2F.agent_logs."""
+    effective_run_id = run_id or app_id or "unknown"
+    effective_space = workspace_id or "personal"
+    effective_app = app_id or "unknown"
+    effective_proj = project_name or "Unknown"
 
+    log_payload = {
+        "id": str(uuid.uuid4()),
+        "run_id": effective_run_id,
+        "run_no": effective_run_id,
+        "project_name": effective_proj,
+        "project_id": effective_space,
+        "space_id": effective_space,
+        "workbook_id": effective_app,
+        "app_id": effective_app,
+        "agent_name": "Qlik Generation Agent",
+        "log_level": "INFO",
+        "message": action_desc,
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "details": {"info": str(details)} if details else {},
+        "type": "agent_log",
+    }
+    # Fire and forget into QT2F.agent_logs
+    fire_and_forget_qlik_log(log_payload)
+
+    # Also log to activity logger
+    from app.services.activity_logger import log_activity_async
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.post(url, json=data, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status not in [200, 201]:
-                    logger.warning(f"[GenLogger] Failed to log action to MongoDB: status={resp.status}")
-    except Exception as e:  # noqa: BLE001 - logging must never block generation
-        logger.debug(f"[GenLogger] MongoDB action logging skipped: {e}")
+        await log_activity_async(
+            run_id=effective_run_id,
+            project_id=effective_space,
+            workbook_id=effective_app,
+            summary=action_desc,
+            status="success",
+        )
+    except Exception as e:
+        logger.debug(f"[GenLogger] Activity logging failed: {e}")
+

@@ -50,15 +50,21 @@ async def log_activity_async(run_id: str, project_id: str, workbook_id: str, sum
             for db_name in ["QT2F", "QT2F_Tableau"]:
                 try:
                     client[db_name]["activities"].insert_one(dict(payload))
+                    client[db_name]["agent_logs"].insert_one(dict(payload))
                 except Exception:
                     pass
         except Exception as err:
             logger.debug(f"[ActivityLogger] Direct MongoDB insert failed: {err}")
 
     # 2. HTTP POST fallback to /api/records/activities
-    for base in [get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
-        if not base or not base.startswith("http"):
-            continue
+    candidate_bases = []
+    for raw in [os.getenv("MONGODB_URL"), get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
+        if raw and raw.startswith("http"):
+            b = raw.rstrip("/")
+            if b not in candidate_bases:
+                candidate_bases.append(b)
+
+    for base in candidate_bases:
         for endpoint in ["/api/records/activities", "/activities"]:
             url = f"{base.rstrip('/')}{endpoint}"
             try:
@@ -103,14 +109,20 @@ def log_activity_sync(run_id: str, project_id: str, workbook_id: str, summary: s
                 for db_name in ["QT2F", "QT2F_Tableau"]:
                     try:
                         client[db_name]["activities"].insert_one(dict(payload))
+                        client[db_name]["agent_logs"].insert_one(dict(payload))
                     except Exception:
                         pass
             except Exception as err:
                 logger.debug(f"[ActivityLogger] Direct MongoDB insert failed: {err}")
 
-        for base in [get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
-            if not base or not base.startswith("http"):
-                continue
+        candidate_bases = []
+        for raw in [os.getenv("MONGODB_URL"), get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
+            if raw and raw.startswith("http"):
+                b = raw.rstrip("/")
+                if b not in candidate_bases:
+                    candidate_bases.append(b)
+
+        for base in candidate_bases:
             for endpoint in ["/api/records/activities", "/activities"]:
                 url = f"{base.rstrip('/')}{endpoint}"
                 try:

@@ -85,9 +85,50 @@ def get_log_token() -> Optional[str]:
     """Retrieves the current Bearer token."""
     return _request_token_ctx.get()
 
+from concurrent.futures import ThreadPoolExecutor
+import requests
+_TABLEAU_LOG_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tableau-mongo-log")
+
+def _save_tableau_log_sync(payload: Dict):
+    """Synchronously persist log entry to QT2F_Tableau database, agent_logs collection."""
+    # 1. Direct MongoDB insert if MONGO_URI / MONGODB_URL is mongodb:// connection
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+    if mongo_uri and mongo_uri.startswith("mongodb"):
+        try:
+            import pymongo
+            client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+            for db_name in ["QT2F_Tableau", "QT2F_Tablaue", "QT2F"]:
+                try:
+                    client[db_name]["agent_logs"].insert_one(dict(payload))
+                    client[db_name]["logs"].insert_one(dict(payload))
+                except Exception:
+                    pass
+            return
+        except Exception as pe:
+            pass
+
+    # 2. HTTP Proxy endpoint fallback
+    candidate_bases = []
+    for raw in [os.getenv("MONGODB_URL"), getattr(Config, "MONGODB_URL", None)]:
+        if raw and str(raw).startswith("http"):
+            b = str(raw).rstrip("/")
+            if b not in candidate_bases:
+                candidate_bases.append(b)
+
+    for base in candidate_bases:
+        for route in ["/api/records/logs", "/api/records/agent-logs"]:
+            url = f"{base}{route}"
+            try:
+                res = requests.post(url, json=payload, timeout=(1, 3))
+                if res.status_code in (200, 201):
+                    return
+            except Exception:
+                continue
+
 async def _do_post_log(payload: Dict):
     """
     Internal helper to send the log to MongoDB asynchronously.
+    Persists to QT2F_Tableau database in agent_logs collection.
     """
     try:
         try:
@@ -96,20 +137,52 @@ async def _do_post_log(payload: Dict):
             logger.warning(f"[Log Storage] Payload failed contract validation: {ve}. Sending raw payload.")
             validated_payload = payload
 
+        # 1. Direct MongoDB insertion if MONGO_URI / MONGODB_URL is mongodb:// connection
+        mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+        if mongo_uri and mongo_uri.startswith("mongodb"):
+            try:
+                import pymongo
+                client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+                for db_name in ["QT2F_Tableau", "QT2F_Tablaue", "QT2F"]:
+                    try:
+                        client[db_name]["agent_logs"].insert_one(dict(validated_payload))
+                        client[db_name]["logs"].insert_one(dict(validated_payload))
+                    except Exception:
+                        pass
+            except Exception as pe:
+                logger.debug(f"[Log Storage] Direct MongoDB insert failed: {pe}")
+
+        # 2. Async Client / HTTP Proxy
         if mongo_db is not None:
-            await mongo_db["logs"].insert_one(validated_payload)
+            try:
+                await mongo_db["agent_logs"].insert_one(validated_payload)
+            except Exception:
+                pass
+            try:
+                await mongo_db["logs"].insert_one(validated_payload)
+            except Exception:
+                pass
         else:
             logger.warning("[Log Storage] MONGODB_URL not configured. Skipping save.")
     except Exception as e:
         err_msg = f"Failed to send log to MongoDB: {e}"
         logger.error(f"[Log Storage] {err_msg}")
-        store_deadletter("mongodb://logs", payload, err_msg)
+        store_deadletter("mongodb://agent_logs", payload, err_msg)
 
 def fire_and_forget_log(payload: Dict):
     """
-    Schedules the log MongoDB call on the running event loop without blocking.
+    Schedules the log MongoDB call in background thread pool without blocking.
     """
-    run_background_task(_do_post_log(payload), task_name="fire_and_forget_log")
+    try:
+        _TABLEAU_LOG_POOL.submit(_save_tableau_log_sync, payload)
+    except Exception:
+        pass
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            run_background_task(_do_post_log(payload), task_name="fire_and_forget_log")
+    except Exception:
+        pass
 
 # --- 1. Core Logging Logic ---
 
@@ -118,6 +191,7 @@ def build_payload(level: str, message: str, details: Any = None, project_id=None
     Constructs the JSON payload for the MongoDB API.
     Retrieves project_id and run_id from context if not provided.
     """
+    import uuid
     p_id = project_id or _project_id_ctx.get()
     r_id = run_id or _run_id_ctx.get()
     w_id = _workbook_id_ctx.get()
@@ -128,15 +202,18 @@ def build_payload(level: str, message: str, details: Any = None, project_id=None
         details = {"info": str(details)}
     
     return {
+        "id": str(uuid.uuid4()),
         "project_name": p_id,
         "project_id": p_id,
         "run_id": r_id,
+        "run_no": r_id,
         "workbook_id": w_id,
         "agent_name": "Generation Agent",
         "log_level": level.upper(),
         "message": str(message),
         "timestamp": datetime.datetime.utcnow().isoformat(),
-        "details": details or {}
+        "details": details or {},
+        "type": "agent_log"
     }
 
 # --- 2. Synchronous Loggers (Used by standard scripts) ---
