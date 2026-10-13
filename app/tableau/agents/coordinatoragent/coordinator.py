@@ -186,15 +186,37 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
             if workbook_id:
                 query["workbook_id"] = workbook_id
 
-            await mongo_db["generation"].update_one(query, {"$set": record}, upsert=True)
-
-            # If completed, clean up any previous failed records for this run_id so validation never reads stale failures
+            # If completed, clean up any previous failed record so stale failures never linger
             if status == "completed":
                 try:
-                    await mongo_db["generation_results"].delete_many({"run_id": run_id, "status": "failed"})
+                    del_query = {"run_id": run_id}
+                    if project_id:
+                        del_query["project_id"] = project_id
+                    if workbook_id:
+                        del_query["workbook_id"] = workbook_id
+                    await mongo_db["generation"].delete_many(del_query)
                 except Exception as de:
-                    log_warning(f"[CoordinatorAgent] Could not clean up failed generation_results: {de}")
+                    log_warning(f"[CoordinatorAgent] Could not clean up failed generation records: {de}")
 
+            # Try saving record; if payload is large (> 500KB) strip raw trees to guarantee HTTP/Lambda delivery
+            import json as _json
+            try:
+                dumped_size = len(_json.dumps(record.get("payload", {})))
+                if dumped_size > 500_000:
+                    log_info(f"[CoordinatorAgent] Payload size {dumped_size} bytes exceeds 500KB; pruning raw file trees for safe persistence")
+                    p = record.get("payload", {})
+                    record["payload"] = {
+                        "final_response": p.get("final_response", {}),
+                        "summary": p.get("final_response", {}).get("summary", {}),
+                        "project": p.get("final_response", {}).get("project", {}),
+                        "calculated_fields": p.get("calculated_fields", []),
+                        "new_app_name": p.get("new_app_name"),
+                        "destination_folder": p.get("destination_folder"),
+                    }
+            except Exception:
+                pass
+
+            await mongo_db["generation"].update_one(query, {"$set": record}, upsert=True)
             log_info(f"[CoordinatorAgent] Successfully upserted generation record | Status: {status}")
         except Exception as e:
             log_error(f"[CoordinatorAgent] Failed to save generation record to MongoDB: {e}")

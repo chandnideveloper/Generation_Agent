@@ -6,7 +6,10 @@ Zero credential leakage.
 
 import os
 from typing import Any, Dict, Literal, Optional
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, model_validator
+
+load_dotenv(override=False)
 
 
 class GitHubTargetConfig(BaseModel):
@@ -33,6 +36,9 @@ class GitHubTargetConfig(BaseModel):
             # normalize repo / repo_name
             if not data.get("repo_name"):
                 data["repo_name"] = data.get("repo") or data.get("repository") or os.getenv("GITHUB_REPO", "tmdl")
+            # normalize branch
+            if not data.get("branch"):
+                data["branch"] = os.getenv("BRANCH", "main")
             # normalize git_pat
             if not data.get("git_pat"):
                 data["git_pat"] = (
@@ -72,7 +78,19 @@ class TargetConfig(BaseModel):
         default="fabric", description="Target platform. Must be 'fabric'"
     )
     deployment_type: Optional[str] = Field(default="git", description="Deployment type (e.g. 'git')")
-    github: GitHubTargetConfig
+    github: GitHubTargetConfig = Field(
+        default_factory=GitHubTargetConfig, description="GitHub deployment configuration"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_target(cls, data: Any) -> Any:
+        if data is None:
+            return {}
+        if isinstance(data, dict):
+            if "github" not in data or data["github"] is None:
+                data["github"] = {}
+        return data
 
 
 class UnifiedMigrateRequest(BaseModel):
@@ -86,7 +104,17 @@ class UnifiedMigrateRequest(BaseModel):
     mapping_result: Optional[Dict[str, Any]] = Field(
         default=None, description="Optional inline Contract 2.0 mapping document"
     )
-    target: TargetConfig
+    target: TargetConfig = Field(
+        default_factory=TargetConfig, description="Target deployment configuration"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_request_target(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "target" not in data or data["target"] is None:
+                data["target"] = {}
+        return data
 
     @model_validator(mode="after")
     def validate_source_fields(self) -> "UnifiedMigrateRequest":
