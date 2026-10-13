@@ -336,12 +336,17 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
     """Persist the generation result in the MongoDB microservice."""
     import requests
     clean_app_id = re.sub(r"[\s_]+", "-", str(request.app_id or "").strip())
-    db_location = "QT2F.generation_results"
+    eff_space = request.space_id or request.workspace_id or "personal"
+    eff_app = clean_app_id or request.app_id
     doc = {
         "run_id": request.run_id,
-        "space_id": request.space_id or request.workspace_id or "personal",
-        "app_id": clean_app_id or request.app_id,
+        "space_id": eff_space,
+        "app_id": eff_app,
         "space_name": request.space_id or "Unknown",
+        # Compatible aliases for unified and Tableau endpoints
+        "project_id": eff_space,
+        "workbook_id": eff_app,
+        "project_name": app_name or request.app_id or "Unknown",
         "status": "completed" if str(result.get("status", "")).lower() in ("success", "completed", "ok") else "partial_success",
         "payload": {
             "app_name": app_name,
@@ -361,7 +366,7 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
         },
     }
 
-    # Attempt immediate synchronous save
+    # Attempt immediate synchronous save to all configured endpoints
     saved = False
     for base in [config.MONGO_API_URL, os.getenv("MONGODB_URL")]:
         if not base:
@@ -372,7 +377,8 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
             if res.status_code in (200, 201):
                 logger.info(f"Successfully saved generation result directly to {url}")
                 saved = True
-                break
+            else:
+                logger.warning(f"Post to {url} returned {res.status_code}: {res.text[:100]}")
         except Exception as e:
             logger.warning(f"Direct post to {url} failed: {e}")
 
