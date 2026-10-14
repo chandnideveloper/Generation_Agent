@@ -333,6 +333,8 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
 def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name: str) -> str:
     """Persist the generation result in the MongoDB microservice (QT2F.generation_results)."""
     import requests
+    import time
+    import datetime
     clean_app_id = re.sub(r"[\s_]+", "-", str(request.app_id or "").strip())
     eff_space = str(request.space_id or request.workspace_id or "personal").strip()
     eff_app = clean_app_id or str(request.app_id).strip()
@@ -340,7 +342,9 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
     qlik_base = (config.MONGO_API_URL or os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws").rstrip('/')
     db_location = f"{qlik_base}/api/records/generation?run_id={request.run_id}&app_id={eff_app}&space_id={eff_space}"
 
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     doc = {
+        "id": str(request.run_id).strip(),
         "run_id": str(request.run_id).strip(),
         "space_id": eff_space,
         "app_id": eff_app,
@@ -349,6 +353,9 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
         "workbook_id": eff_app,
         "project_name": app_name or str(request.app_id or "Unknown").strip(),
         "status": "completed" if str(result.get("status", "")).lower() in ("success", "completed", "ok") else "failed",
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "timestamp": now_iso,
         "db_location": db_location,
         "fetch_url": db_location,
         "database": "QT2F",
@@ -387,14 +394,24 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
 
     # 2. HTTP POST strictly to Qlik microservice (/api/records/generation)
     target_url = f"{qlik_base}/api/records/generation"
-    try:
-        res = requests.post(target_url, json=doc, timeout=15)
-        if res.status_code in (200, 201):
-            logger.info(f"Successfully saved Qlik generation result to {target_url}")
-        else:
-            logger.warning(f"Post to {target_url} returned {res.status_code}: {res.text[:100]}")
-    except Exception as e:
-        logger.warning(f"Direct post to {target_url} failed: {e}")
+    posted = False
+    for attempt in range(3):
+        try:
+            res = requests.post(target_url, json=doc, timeout=15)
+            if res.status_code in (200, 201):
+                logger.info(f"Successfully saved Qlik generation result to {target_url}")
+                posted = True
+                break
+            elif res.status_code == 429:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            else:
+                logger.warning(f"Post to {target_url} returned {res.status_code}: {res.text[:100]}")
+        except Exception as e:
+            logger.warning(f"Direct post to {target_url} failed on attempt {attempt+1}: {e}")
+            time.sleep(1.0)
+
+    if not posted:
         _TELEMETRY_POOL.submit(_post_with_fallback, "api/records/generation", doc, (2, 10))
 
     result["db_location"] = db_location

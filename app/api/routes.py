@@ -42,9 +42,39 @@ async def health():
     }
 
 
+def _extract_record_timestamp(rec: Any) -> float:
+    if not isinstance(rec, dict):
+        return 0.0
+    import datetime
+    for key in ("updated_at", "created_at", "timestamp"):
+        val = rec.get(key)
+        if val and isinstance(val, str):
+            try:
+                clean = val.replace("Z", "+00:00")
+                return datetime.datetime.fromisoformat(clean).timestamp()
+            except Exception:
+                pass
+    if rec.get("_ts"):
+        try:
+            return float(rec["_ts"])
+        except Exception:
+            pass
+    payload = rec.get("payload")
+    if isinstance(payload, dict):
+        for key in ("updated_at", "created_at", "timestamp"):
+            val = payload.get(key)
+            if val and isinstance(val, str):
+                try:
+                    clean = val.replace("Z", "+00:00")
+                    return datetime.datetime.fromisoformat(clean).timestamp()
+                except Exception:
+                    pass
+    return 0.0
+
+
 @router.get(
     "/api/records/generation",
-    summary="Get generation response for a given run_id, app/workbook_id, and space/project_id (Qlik or Tableau)",
+    summary="Get latest generation response for a given run_id, app/workbook_id, and space/project_id (Qlik or Tableau)",
 )
 async def get_migration_status(
     run_id: Optional[str] = None,
@@ -52,137 +82,181 @@ async def get_migration_status(
     space_id: Optional[str] = None,
     workbook_id: Optional[str] = None,
     app_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    source: Optional[str] = None,
 ):
-    if mongo_db is None:
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": "MongoDB is not configured."}
-        )
+    # Build query check based on provided parameters
+    eff_run_id = run_id.strip() if run_id else None
+    eff_project_id = project_id.strip() if project_id else None
+    eff_space_id = space_id.strip() if space_id else None
+    eff_workbook_id = workbook_id.strip() if workbook_id else None
+    eff_app_id = app_id.strip() if app_id else None
 
-    # Build query based on provided parameters
-    query = {}
-    if run_id:
-        query["run_id"] = run_id.strip()
-    if project_id:
-        query["project_id"] = project_id.strip()
-    if space_id:
-        query["space_id"] = space_id.strip()
-    if workbook_id:
-        query["workbook_id"] = workbook_id.strip()
-    if app_id:
-        query["app_id"] = app_id.strip()
-
-    if not query:
+    if not any([eff_run_id, eff_project_id, eff_space_id, eff_workbook_id, eff_app_id]):
         return JSONResponse(
             status_code=400,
-            content={"status": "error", "message": "Please provide at least one query parameter (run_id, project_id, etc.)"}
+            content={"status": "error", "message": "Please provide at least one query parameter (run_id, project_id, workbook_id, etc.)"}
         )
 
     import re
-    # Clean and normalize IDs
-    clean_app_id = re.sub(r"[\s_]+", "-", app_id.strip()) if app_id else None
-    clean_wb_id = re.sub(r"[\s_]+", "-", workbook_id.strip()) if workbook_id else None
-    eff_app_id = clean_app_id or clean_wb_id or (app_id.strip() if app_id else (workbook_id.strip() if workbook_id else None))
-    eff_space_id = (space_id.strip() if space_id else (project_id.strip() if project_id else None))
-    eff_run_id = run_id.strip() if run_id else None
+    import httpx
+    import asyncio
+    from app.qlik.config import config as qlik_config
 
-    try:
-        import httpx
-        from app.qlik.config import config as qlik_config
+    src = (source_type or source or "").lower().strip()
+    is_tableau_specific = src == "tableau" or (eff_workbook_id and not eff_app_id) or (eff_project_id and not eff_space_id)
+    is_qlik_specific = src == "qlik" or (eff_app_id and not eff_workbook_id) or (eff_space_id and not eff_project_id)
 
-        # 1. Try Qlik MongoDB Microservice
-        if qlik_config.MONGO_API_URL:
-            qlik_base = qlik_config.MONGO_API_URL.rstrip('/')
-            qlik_url = f"{qlik_base}/api/records/generation"
+    # Candidate records collected: list of dicts with _source tag
+    candidates = []
 
-            # Prepare param candidates (with normalized app_id, default space_id, etc.)
-            candidate_params = []
-            if eff_run_id:
-                candidate_params.append({
-                    "space_id": eff_space_id or "personal",
-                    "app_id": eff_app_id or "926e0fd3-a729-41af-91b8-4f9e9787d7da",
+    # 1. Fetch from Tableau Microservice / Proxy
+    tb_base = (os.getenv("MONGODB_URL") or "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws").rstrip('/')
+    tb_url = f"{tb_base}/api/records/generation"
+
+    # We only skip Tableau if caller explicitly requested Qlik
+    if not is_qlik_specific:
+        tb_param_sets = []
+        # Case A: Full specific parameters
+        target_proj = eff_project_id or eff_space_id
+        target_wb = eff_workbook_id or eff_app_id
+        if eff_run_id and target_proj and target_wb:
+            tb_param_sets.append({
+                "run_id": eff_run_id,
+                "project_id": target_proj,
+                "workbook_id": target_wb,
+            })
+        elif eff_run_id:
+            # Case B: Only run_id provided
+            tb_param_sets.append({"run_id": eff_run_id})
+
+        async with httpx.AsyncClient() as client:
+            for p in tb_param_sets:
+                for attempt in range(2):
+                    try:
+                        resp = await client.get(tb_url, params=p, timeout=15)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict):
+                                        item["_resolved_source"] = "tableau"
+                                        candidates.append(item)
+                            elif isinstance(data, dict):
+                                data["_resolved_source"] = "tableau"
+                                candidates.append(data)
+                            break
+                        elif resp.status_code == 429:
+                            await asyncio.sleep(1.0)
+                            continue
+                        elif resp.status_code == 404:
+                            break
+                    except Exception as e:
+                        logger.debug(f"[Tableau GET generation] attempt {attempt+1} error: {e}")
+
+    # 2. Fetch from Qlik Microservice
+    qlik_base = (qlik_config.MONGO_API_URL or os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws").rstrip('/')
+    qlik_url = f"{qlik_base}/api/records/generation"
+
+    # We only skip Qlik if caller explicitly requested Tableau
+    if not is_tableau_specific:
+        qlik_param_sets = []
+        target_space = eff_space_id or eff_project_id or "personal"
+        target_app = eff_app_id or (re.sub(r"[\s_]+", "-", eff_workbook_id) if eff_workbook_id else None)
+        if eff_run_id:
+            if target_app:
+                qlik_param_sets.append({
                     "run_id": eff_run_id,
+                    "space_id": target_space,
+                    "app_id": target_app,
                 })
-                if app_id and app_id.strip() != eff_app_id:
-                    candidate_params.append({
-                        "space_id": eff_space_id or "personal",
-                        "app_id": app_id.strip(),
-                        "run_id": eff_run_id,
-                    })
+            else:
+                qlik_param_sets.append({
+                    "run_id": eff_run_id,
+                    "space_id": target_space,
+                    "app_id": "926e0fd3-a729-41af-91b8-4f9e9787d7da",
+                })
 
-            fallback_remote_data = None
-            async with httpx.AsyncClient() as client:
-                for p in candidate_params:
+        async with httpx.AsyncClient() as client:
+            for p in qlik_param_sets:
+                for attempt in range(2):
                     try:
                         resp = await client.get(qlik_url, params=p, timeout=15)
                         if resp.status_code == 200:
                             data = resp.json()
-                            if data:
-                                cand = data
-                                if isinstance(data, list):
-                                    completed = next((x for x in data if isinstance(x, dict) and x.get("status") == "completed"), None)
-                                    cand = completed or data[0]
-                                if isinstance(cand, dict) and cand.get("status") == "completed":
-                                    return JSONResponse(status_code=200, content=cand)
-                                fallback_remote_data = cand
+                            if isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict):
+                                        item["_resolved_source"] = "qlik"
+                                        candidates.append(item)
+                            elif isinstance(data, dict):
+                                data["_resolved_source"] = "qlik"
+                                candidates.append(data)
+                            break
+                        elif resp.status_code == 429:
+                            await asyncio.sleep(1.0)
+                            continue
+                        elif resp.status_code == 404:
+                            break
                     except Exception as e:
-                        logger.warning(f"Error querying Qlik generation records with {p}: {e}")
+                        logger.debug(f"[Qlik GET generation] attempt {attempt+1} error: {e}")
 
-        # 2. Try direct MongoDB query across QT2F_Tableau and QT2F for generation_results
-        mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
-        if mongo_uri and mongo_uri.startswith("mongodb"):
-            try:
-                import pymongo
-                client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-                for db_name in ["QT2F_Tableau", "QT2F"]:
-                    rec = client[db_name]["generation_results"].find_one(
-                        {"run_id": eff_run_id} if eff_run_id else {"status": "completed"},
-                        sort=[('_id', -1)]
-                    )
-                    if rec:
-                        if "_id" in rec:
-                            rec["_id"] = str(rec["_id"])
-                        return JSONResponse(status_code=200, content=rec)
-            except Exception as pe:
-                logger.debug(f"Direct PyMongo lookup for generation_results failed: {pe}")
+    # 3. Direct MongoDB query across QT2F_Tableau and QT2F if mongodb:// URI configured
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+    if mongo_uri and mongo_uri.startswith("mongodb"):
+        try:
+            import pymongo
+            mongo_client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+            target_dbs = []
+            if is_tableau_specific:
+                target_dbs = ["QT2F_Tableau"]
+            elif is_qlik_specific:
+                target_dbs = ["QT2F"]
+            else:
+                target_dbs = ["QT2F_Tableau", "QT2F"]
 
-        # 3. Try Tableau MongoDB proxy (mongo_db['generation_results'])
-        if mongo_db is not None:
-            tb_query = {}
-            if eff_run_id:
-                tb_query["run_id"] = eff_run_id
-            if eff_space_id:
-                tb_query["project_id"] = eff_space_id
-            if eff_app_id:
-                tb_query["workbook_id"] = eff_app_id
+            for db_name in target_dbs:
+                coll = mongo_client[db_name]["generation_results"]
+                find_q = {}
+                if eff_run_id:
+                    find_q["run_id"] = eff_run_id
+                docs = list(coll.find(find_q).sort([('_id', -1), ('created_at', -1)]).limit(5))
+                for doc in docs:
+                    if "_id" in doc:
+                        doc["_id"] = str(doc["_id"])
+                    doc["_resolved_source"] = "tableau" if db_name == "QT2F_Tableau" else "qlik"
+                    candidates.append(doc)
+        except Exception as pe:
+            logger.debug(f"Direct PyMongo generation_results query failed: {pe}")
 
-            completed_query = dict(tb_query)
-            completed_query["status"] = "completed"
-            record = await mongo_db["generation_results"].find_one(completed_query, sort=[('_id', -1)])
-            if not record:
-                record = await mongo_db["generation_results"].find_one(tb_query, sort=[('_id', -1)])
-            if not record:
-                record = await mongo_db["generation"].find_one(completed_query, sort=[('_id', -1)])
-            if not record:
-                record = await mongo_db["generation"].find_one(tb_query, sort=[('_id', -1)])
-            if record:
-                if "_id" in record:
-                    record["_id"] = str(record["_id"])
-                return JSONResponse(status_code=200, content=record)
-
-        if fallback_remote_data is not None:
-            return JSONResponse(status_code=200, content=fallback_remote_data)
-
+    if not candidates:
         return JSONResponse(
             status_code=404,
-            content={"status": "error", "message": f"No generation response found for query: {query}"}
+            content={"status": "error", "message": f"No generation response found for query: run_id={eff_run_id}, project_id={eff_project_id}, workbook_id={eff_workbook_id}"}
         )
-    except Exception as e:
-        logger.exception(f"[GET /api/records/generation] Error fetching record: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)}
-        )
+
+    # Filter candidates by platform if specific platform was requested
+    filtered = candidates
+    if is_tableau_specific:
+        tb_filtered = [c for c in candidates if c.get("_resolved_source") == "tableau"]
+        if tb_filtered:
+            filtered = tb_filtered
+    elif is_qlik_specific:
+        qlik_filtered = [c for c in candidates if c.get("_resolved_source") == "qlik"]
+        if qlik_filtered:
+            filtered = qlik_filtered
+
+    # Sort all matching candidates: completed status first, then by latest timestamp epoch descending!
+    def _rank_candidate(c: dict):
+        status_rank = 1 if str(c.get("status", "")).lower() == "completed" else 0
+        ts_rank = _extract_record_timestamp(c)
+        return (status_rank, ts_rank)
+
+    sorted_candidates = sorted(filtered, key=_rank_candidate, reverse=True)
+    best_record = sorted_candidates[0]
+    best_record.pop("_resolved_source", None)
+
+    return JSONResponse(status_code=200, content=best_record)
 
 
 @router.get(

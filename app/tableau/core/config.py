@@ -187,18 +187,43 @@ if Config.MONGODB_URL:
                     queries_to_try.append(base_params)
                         
                 import asyncio
+                import datetime
+
+                def _item_ts(item):
+                    if not isinstance(item, dict):
+                        return 0.0
+                    for k in ("updated_at", "created_at", "timestamp"):
+                        v = item.get(k)
+                        if v and isinstance(v, str):
+                            try:
+                                return datetime.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+                            except Exception:
+                                pass
+                    if item.get("_ts"):
+                        try:
+                            return float(item["_ts"])
+                        except Exception:
+                            pass
+                    return 0.0
+
                 async with httpx.AsyncClient() as client:
                     for params in queries_to_try:
-                        for attempt in range(2):
+                        for attempt in range(3):
                             try:
                                 resp = await client.get(url, params=params, timeout=45.0)
                                 if resp.status_code == 200:
                                     data = resp.json()
                                     if isinstance(data, list) and data:
-                                        return data[0]
+                                        # Sort by newest timestamp descending to always get the latest record
+                                        sorted_list = sorted(data, key=_item_ts, reverse=True)
+                                        return sorted_list[0]
                                     if isinstance(data, dict):
                                         return data
                                     break
+                                elif resp.status_code == 429:
+                                    logger.warning(f"HTTP find_one for {self.name} received 429 Rate Limit on attempt {attempt+1}")
+                                    await asyncio.sleep(1.5 * (attempt + 1))
+                                    continue
                                 elif resp.status_code == 404:
                                     break
                                 else:
@@ -206,7 +231,7 @@ if Config.MONGODB_URL:
                             except Exception as e:
                                 logger.warning(f"HTTP find_one error for {self.name} on attempt {attempt+1}: {e}")
                             
-                            if attempt < 1:
+                            if attempt < 2:
                                 await asyncio.sleep(1.0)
                 return None
 
@@ -226,17 +251,21 @@ if Config.MONGODB_URL:
                 url = f"{self.base_url}/api/records/{route}"
                 import asyncio
                 async with httpx.AsyncClient() as client:
-                    for attempt in range(2):
+                    for attempt in range(3):
                         try:
                             resp = await client.post(url, json=document, timeout=30.0)
                             if resp.status_code in (200, 201):
                                 return resp.json()
+                            elif resp.status_code == 429:
+                                logger.warning(f"HTTP insert_one for {self.name} received 429 Rate Limit on attempt {attempt+1}")
+                                await asyncio.sleep(1.5 * (attempt + 1))
+                                continue
                             else:
                                 logger.warning(f"HTTP insert_one for {self.name} returned {resp.status_code} on attempt {attempt+1}")
                         except Exception as e:
                             logger.warning(f"HTTP insert_one error for {self.name} on attempt {attempt+1}: {e}")
                             
-                        if attempt < 1:
+                        if attempt < 2:
                             await asyncio.sleep(1.0)
                     return None
 
@@ -263,21 +292,33 @@ if Config.MONGODB_URL:
 
                 import asyncio
                 async with httpx.AsyncClient() as client:
-                    try:
-                        resp = await client.patch(url, params=params, json=payload, timeout=30.0)
-                        if resp.status_code in (200, 204):
-                            return type("UpdateResult", (), {"matched_count": 1, "modified_count": 1, "upserted_id": None})()
-                        elif resp.status_code == 404 and upsert:
-                            post_payload = {**params, **payload}
-                            p_resp = await client.post(url, json=post_payload, timeout=30.0)
-                            if p_resp.status_code in (200, 201):
-                                return type("UpdateResult", (), {"matched_count": 0, "modified_count": 1, "upserted_id": params.get("run_id")})()
+                    for attempt in range(3):
+                        try:
+                            resp = await client.patch(url, params=params, json=payload, timeout=30.0)
+                            if resp.status_code in (200, 204):
+                                return type("UpdateResult", (), {"matched_count": 1, "modified_count": 1, "upserted_id": None})()
+                            elif resp.status_code == 429:
+                                logger.warning(f"HTTP update_one for {self.name} received 429 Rate Limit on attempt {attempt+1}")
+                                await asyncio.sleep(1.5 * (attempt + 1))
+                                continue
+                            elif resp.status_code == 404 and upsert:
+                                post_payload = {**params, **payload}
+                                p_resp = await client.post(url, json=post_payload, timeout=30.0)
+                                if p_resp.status_code in (200, 201):
+                                    return type("UpdateResult", (), {"matched_count": 0, "modified_count": 1, "upserted_id": params.get("run_id")})()
+                                elif p_resp.status_code == 429:
+                                    logger.warning(f"HTTP update_one post upsert received 429 on attempt {attempt+1}")
+                                    await asyncio.sleep(1.5 * (attempt + 1))
+                                    continue
+                                else:
+                                    logger.warning(f"HTTP update_one upsert failed ({p_resp.status_code}): {p_resp.text[:100]}")
                             else:
-                                logger.warning(f"HTTP update_one upsert failed ({p_resp.status_code}): {p_resp.text[:100]}")
-                        else:
-                            logger.warning(f"HTTP update_one PATCH returned {resp.status_code}: {resp.text[:100]}")
-                    except Exception as e:
-                        logger.warning(f"HTTP update_one error for {self.name}: {e}")
+                                logger.warning(f"HTTP update_one PATCH returned {resp.status_code}: {resp.text[:100]}")
+                        except Exception as e:
+                            logger.warning(f"HTTP update_one error for {self.name} on attempt {attempt+1}: {e}")
+                        
+                        if attempt < 2:
+                            await asyncio.sleep(1.0)
                 return type("UpdateResult", (), {"matched_count": 0, "modified_count": 0, "upserted_id": None})()
 
             async def delete_many(self, filter_query):
@@ -291,12 +332,20 @@ if Config.MONGODB_URL:
                         params[k] = str(v)
                 import asyncio
                 async with httpx.AsyncClient() as client:
-                    try:
-                        resp = await client.delete(url, params=params, timeout=15.0)
-                        if resp.status_code in (200, 204):
-                            return type("DeleteResult", (), {"deleted_count": 1})()
-                    except Exception as e:
-                        logger.warning(f"HTTP delete_many error for {self.name}: {e}")
+                    for attempt in range(3):
+                        try:
+                            resp = await client.delete(url, params=params, timeout=15.0)
+                            if resp.status_code in (200, 204):
+                                return type("DeleteResult", (), {"deleted_count": 1})()
+                            elif resp.status_code == 429:
+                                logger.warning(f"HTTP delete_many for {self.name} received 429 Rate Limit on attempt {attempt+1}")
+                                await asyncio.sleep(1.5 * (attempt + 1))
+                                continue
+                        except Exception as e:
+                            logger.warning(f"HTTP delete_many error for {self.name} on attempt {attempt+1}: {e}")
+                        
+                        if attempt < 2:
+                            await asyncio.sleep(1.0)
                 return type("DeleteResult", (), {"deleted_count": 0})()
                         
         class HTTPDatabase:

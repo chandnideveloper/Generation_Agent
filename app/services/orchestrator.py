@@ -72,14 +72,19 @@ class MigrationOrchestrator:
             source_type=source_type,
         )
 
-        if source_type == "qlik":
-            raw_result = await self._run_qlik_generation(request, client_token)
-            final_res = self._normalize_qlik_result(request, raw_result)
-        elif source_type == "tableau":
-            raw_result = await self._run_tableau_generation(request, client_token)
-            final_res = self._normalize_tableau_result(request, raw_result)
-        else:
-            raise ValueError(f"Unsupported source_type: '{source_type}'. Must be 'qlik' or 'tableau'")
+        try:
+            if source_type == "qlik":
+                raw_result = await self._run_qlik_generation(request, client_token)
+                final_res = self._normalize_qlik_result(request, raw_result)
+            elif source_type == "tableau":
+                raw_result = await self._run_tableau_generation(request, client_token)
+                final_res = self._normalize_tableau_result(request, raw_result)
+            else:
+                raise ValueError(f"Unsupported source_type: '{source_type}'. Must be 'qlik' or 'tableau'")
+        except Exception as gen_err:
+            logger.error(f"[Orchestrator] Generation failed for {source_type} run_id={request.run_id}: {gen_err}")
+            await self._save_failure_record(request, source_type, project_id, workbook_id, str(gen_err))
+            raise
 
         # Agent Action: Stage 5
         if final_res.status == "success":
@@ -94,26 +99,39 @@ class MigrationOrchestrator:
         # Persist generation record in MongoDB strictly into target database and collection
         try:
             import os
+            import time
+            import datetime
             import requests
             import re
             final_dict = final_res.model_dump() if hasattr(final_res, "model_dump") else dict(final_res)
 
             mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
             if source_type == "tableau":
                 mongo_base = (os.getenv("MONGODB_URL") or "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws").rstrip("/")
                 post_url = f"{mongo_base}/api/records/generation"
+                tb_payload = dict(final_dict)
+                if isinstance(raw_result, dict):
+                    for k in ("semantic_model", "report", "new_app_name", "destination_folder", "calculated_fields"):
+                        if k in raw_result:
+                            tb_payload[k] = raw_result[k]
+
                 tb_record = {
+                    "id": str(request.run_id).strip(),
                     "run_id": str(request.run_id).strip(),
                     "project_id": str(project_id).strip(),
                     "workbook_id": str(workbook_id).strip(),
                     "project_name": str(project_id or workbook_id).strip(),
                     "status": "completed" if final_res.status == "success" else "failed",
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                    "timestamp": now_iso,
                     "db_location": final_res.db_location,
                     "fetch_url": final_res.db_location,
                     "database": "QT2F_Tableau",
                     "collection": "generation_results",
-                    "payload": final_dict,
+                    "payload": tb_payload,
                 }
                 # Direct PyMongo write to QT2F_Tableau.generation_results
                 if mongo_uri and mongo_uri.startswith("mongodb"):
@@ -128,28 +146,43 @@ class MigrationOrchestrator:
                     except Exception as pe:
                         logger.debug(f"[Orchestrator] Direct PyMongo write failed: {pe}")
 
-                # Microservice write (PATCH then POST)
+                # Microservice write (PATCH then POST with backoff on 429)
                 params = {
                     "run_id": str(request.run_id).strip(),
                     "project_id": str(project_id).strip(),
                     "workbook_id": str(workbook_id).strip(),
                 }
                 saved = False
-                try:
-                    patch_resp = requests.patch(post_url, params=params, json=tb_record, timeout=15)
-                    if patch_resp.status_code in (200, 204):
-                        logger.info(f"[Orchestrator] Successfully updated Tableau generation record in QT2F_Tableau.generation_results via {post_url}")
-                        saved = True
-                except Exception as pe:
-                    logger.warning(f"[Orchestrator] PATCH {post_url} error: {pe}")
+                for attempt in range(3):
+                    try:
+                        patch_resp = requests.patch(post_url, params=params, json=tb_record, timeout=15)
+                        if patch_resp.status_code in (200, 204):
+                            logger.info(f"[Orchestrator] Successfully updated Tableau generation record in QT2F_Tableau.generation_results via {post_url}")
+                            saved = True
+                            break
+                        elif patch_resp.status_code == 429:
+                            time.sleep(1.5 * (attempt + 1))
+                            continue
+                        elif patch_resp.status_code == 404:
+                            break
+                    except Exception as pe:
+                        logger.warning(f"[Orchestrator] PATCH {post_url} error: {pe}")
+                        time.sleep(1.0)
 
                 if not saved:
-                    try:
-                        post_resp = requests.post(post_url, json=tb_record, timeout=20)
-                        if post_resp.status_code in (200, 201):
-                            logger.info(f"[Orchestrator] Successfully created Tableau generation record in QT2F_Tableau.generation_results via {post_url}")
-                    except Exception as post_err:
-                        logger.error(f"[Orchestrator] POST {post_url} failed: {post_err}")
+                    for attempt in range(3):
+                        try:
+                            post_resp = requests.post(post_url, json=tb_record, timeout=20)
+                            if post_resp.status_code in (200, 201):
+                                logger.info(f"[Orchestrator] Successfully created Tableau generation record in QT2F_Tableau.generation_results via {post_url}")
+                                saved = True
+                                break
+                            elif post_resp.status_code == 429:
+                                time.sleep(1.5 * (attempt + 1))
+                                continue
+                        except Exception as post_err:
+                            logger.error(f"[Orchestrator] POST {post_url} failed: {post_err}")
+                            time.sleep(1.0)
 
             elif source_type == "qlik":
                 from app.qlik.config import config as qlik_config
@@ -159,6 +192,7 @@ class MigrationOrchestrator:
                 eff_app = clean_app_id or str(workbook_id).strip()
                 eff_space = str(project_id or "personal").strip()
                 qlik_record = {
+                    "id": str(request.run_id).strip(),
                     "run_id": str(request.run_id).strip(),
                     "space_id": eff_space,
                     "app_id": eff_app,
@@ -166,6 +200,9 @@ class MigrationOrchestrator:
                     "project_id": eff_space,
                     "workbook_id": eff_app,
                     "status": "completed" if final_res.status == "success" else "failed",
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                    "timestamp": now_iso,
                     "db_location": final_res.db_location,
                     "fetch_url": final_res.db_location,
                     "database": "QT2F",
@@ -185,12 +222,42 @@ class MigrationOrchestrator:
                     except Exception as pe:
                         logger.debug(f"[Orchestrator] Direct PyMongo write to QT2F.generation_results failed: {pe}")
 
-                try:
-                    p_res = requests.post(post_url, json=qlik_record, timeout=15)
-                    if p_res.status_code in (200, 201):
-                        logger.info(f"[Orchestrator] Successfully saved Qlik generation record to QT2F.generation_results at {post_url}")
-                except Exception as p_err:
-                    logger.warning(f"[Orchestrator] POST {post_url} failed: {p_err}")
+                # Microservice write (PATCH then POST with backoff on 429)
+                params = {
+                    "run_id": str(request.run_id).strip(),
+                    "space_id": eff_space,
+                    "app_id": eff_app,
+                }
+                saved = False
+                for attempt in range(3):
+                    try:
+                        patch_resp = requests.patch(post_url, params=params, json=qlik_record, timeout=15)
+                        if patch_resp.status_code in (200, 204):
+                            logger.info(f"[Orchestrator] Successfully updated Qlik generation record via PATCH {post_url}")
+                            saved = True
+                            break
+                        elif patch_resp.status_code == 429:
+                            time.sleep(1.5 * (attempt + 1))
+                            continue
+                        elif patch_resp.status_code == 404:
+                            break
+                    except Exception as pe:
+                        logger.warning(f"[Orchestrator] PATCH {post_url} error: {pe}")
+                        time.sleep(1.0)
+
+                if not saved:
+                    for attempt in range(3):
+                        try:
+                            p_res = requests.post(post_url, json=qlik_record, timeout=15)
+                            if p_res.status_code in (200, 201):
+                                logger.info(f"[Orchestrator] Successfully saved Qlik generation record to QT2F.generation_results at {post_url}")
+                                break
+                            elif p_res.status_code == 429:
+                                time.sleep(1.5 * (attempt + 1))
+                                continue
+                        except Exception as p_err:
+                            logger.warning(f"[Orchestrator] POST {post_url} failed: {p_err}")
+                            time.sleep(1.0)
 
         except Exception as exc:
             logger.warning(f"Failed to persist generation record: {exc}")
@@ -477,6 +544,70 @@ class MigrationOrchestrator:
             deployment=deployment,
             details=clean_result,
         )
+
+    async def _save_failure_record(
+        self, request: UnifiedMigrateRequest, source_type: str, project_id: str, workbook_id: str, error_message: str
+    ):
+        try:
+            import os
+            import requests
+            import datetime
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+
+            if source_type == "tableau":
+                mongo_base = (os.getenv("MONGODB_URL") or "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws").rstrip("/")
+                post_url = f"{mongo_base}/api/records/generation"
+                rec = {
+                    "id": str(request.run_id).strip(),
+                    "run_id": str(request.run_id).strip(),
+                    "project_id": str(project_id).strip(),
+                    "workbook_id": str(workbook_id).strip(),
+                    "project_name": str(project_id or workbook_id).strip(),
+                    "status": "failed",
+                    "error_message": error_message,
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                    "timestamp": now_iso,
+                    "database": "QT2F_Tableau",
+                    "collection": "generation_results",
+                    "payload": {"status": "failed", "error": error_message},
+                }
+                params = {"run_id": str(request.run_id).strip(), "project_id": str(project_id).strip(), "workbook_id": str(workbook_id).strip()}
+                try:
+                    p = requests.patch(post_url, params=params, json=rec, timeout=10)
+                    if p.status_code in (404, 405):
+                        requests.post(post_url, json=rec, timeout=10)
+                except Exception:
+                    pass
+
+            elif source_type == "qlik":
+                from app.qlik.config import config as qlik_config
+                qlik_base = (qlik_config.MONGO_API_URL or os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws").rstrip("/")
+                post_url = f"{qlik_base}/api/records/generation"
+                rec = {
+                    "id": str(request.run_id).strip(),
+                    "run_id": str(request.run_id).strip(),
+                    "space_id": str(project_id or "personal").strip(),
+                    "app_id": str(workbook_id).strip(),
+                    "status": "failed",
+                    "error_message": error_message,
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                    "timestamp": now_iso,
+                    "database": "QT2F",
+                    "collection": "generation_results",
+                    "payload": {"status": "failed", "error": error_message},
+                }
+                params = {"run_id": str(request.run_id).strip(), "space_id": str(project_id or "personal").strip(), "app_id": str(workbook_id).strip()}
+                try:
+                    p = requests.patch(post_url, params=params, json=rec, timeout=10)
+                    if p.status_code in (404, 405):
+                        requests.post(post_url, json=rec, timeout=10)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Failed to record migration failure: {e}")
 
 
 orchestrator = MigrationOrchestrator()

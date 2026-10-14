@@ -166,6 +166,8 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                 log_warning("[CoordinatorAgent] MONGODB_URL not configured. Skipping save.")
                 return
             
+            import datetime
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
             record = {
                 "id": run_id,
                 "run_id": run_id,
@@ -174,6 +176,9 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                 "project_name": project_name or project_id,
                 "step": step,
                 "status": status,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "timestamp": now_iso,
                 "payload": payload or {}
             }
             
@@ -187,24 +192,12 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
             if workbook_id:
                 query["workbook_id"] = workbook_id
 
-            # If completed, clean up any previous failed record so stale failures never linger
-            if status == "completed":
-                try:
-                    del_query = {"run_id": run_id}
-                    if project_id:
-                        del_query["project_id"] = project_id
-                    if workbook_id:
-                        del_query["workbook_id"] = workbook_id
-                    await mongo_db["generation_results"].delete_many(del_query)
-                except Exception as de:
-                    log_warning(f"[CoordinatorAgent] Could not clean up failed generation records: {de}")
-
-            # Try saving record; if payload is large (> 500KB) strip raw trees to guarantee HTTP/Lambda delivery
+            # Try saving record; if payload is very large (> 1.8MB) strip raw trees to guarantee HTTP/Cosmos delivery
             import json as _json
             try:
                 dumped_size = len(_json.dumps(record.get("payload", {})))
-                if dumped_size > 500_000:
-                    log_info(f"[CoordinatorAgent] Payload size {dumped_size} bytes exceeds 500KB; pruning raw file trees for safe persistence")
+                if dumped_size > 1_800_000:
+                    log_info(f"[CoordinatorAgent] Payload size {dumped_size} bytes exceeds 1.8MB; pruning raw file trees for safe persistence")
                     p = record.get("payload", {})
                     record["payload"] = {
                         "final_response": p.get("final_response", {}),
