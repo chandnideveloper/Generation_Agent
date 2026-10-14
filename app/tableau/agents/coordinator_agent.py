@@ -510,6 +510,9 @@ class CoordinatorAgent(AssistantAgent):
                         timestamp = now_utc.strftime("%Y%m%d_%H%M%S")
 
                     new_app_name = f"{sanitized_name}_{timestamp}"
+                    self.action_logger.project_name = new_app_name
+                    from app.tableau.core.logging_utils import set_project_name_context
+                    set_project_name_context(new_app_name)
                     
                     destination_folder = f"pbip-deploy-tmdl/{target_folder}/{new_app_name}"
                     inner_payload = outer_payload.get("payload")

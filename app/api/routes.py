@@ -283,8 +283,50 @@ async def get_agent_activities(
         )
 
     import os
-    # 1. First check MongoDB directly
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+
+    def _enrich_activities(docs_list, client_instance=None):
+        if not isinstance(docs_list, list) or not docs_list:
+            return docs_list
+        resolved_name = None
+        for d in docs_list:
+            if isinstance(d, dict):
+                p = d.get("project_name")
+                if p and str(p).strip() not in ("Unknown", "null", "None", ""):
+                    resolved_name = str(p).strip()
+                    break
+
+        if not resolved_name and client_instance:
+            try:
+                for db in ["QT2F_Tableau", "QT2F"]:
+                    gen = client_instance[db]["generation_results"].find_one({"run_id": run_id.strip()})
+                    if gen:
+                        candidate = (
+                            gen.get("project_name")
+                            or (gen.get("payload") or {}).get("project", {}).get("name")
+                            or (gen.get("payload") or {}).get("new_app_name")
+                        )
+                        if candidate and str(candidate).strip() not in ("Unknown", "null", "None", ""):
+                            resolved_name = str(candidate).strip()
+                            break
+            except Exception:
+                pass
+
+        if not resolved_name:
+            env_proj = os.getenv("PROJECT_NAME")
+            if env_proj and str(env_proj).strip() not in ("Unknown", "null", "None", ""):
+                resolved_name = str(env_proj).strip()
+
+        if resolved_name:
+            for d in docs_list:
+                if isinstance(d, dict):
+                    cur = d.get("project_name")
+                    if not cur or str(cur).strip() in ("Unknown", "null", "None", ""):
+                        d["project_name"] = resolved_name
+        return docs_list
+
+    # 1. First check MongoDB directly
+    client = None
     if mongo_uri and mongo_uri.startswith("mongodb"):
         try:
             import pymongo
@@ -295,6 +337,7 @@ async def get_agent_activities(
                 if not docs:
                     docs = list(client[db_name]["activities"].find({"run_id": run_id.strip()}).sort("_id", -1))
                 if docs:
+                    docs = _enrich_activities(docs, client)
                     for d in docs:
                         if "_id" in d:
                             d["_id"] = str(d["_id"])
@@ -308,6 +351,8 @@ async def get_agent_activities(
     bases = [
         qlik_config.MONGO_API_URL,
         os.getenv("TELEMETRY_LOCAL_API"),
+        os.getenv("MONGODB_URL"),
+        "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws",
     ]
 
     for base in bases:
@@ -315,10 +360,11 @@ async def get_agent_activities(
             continue
         url = f"{base.rstrip('/')}/api/records/activities"
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, params={"run_id": run_id.strip()}, timeout=15)
+            async with httpx.AsyncClient() as http_client:
+                resp = await http_client.get(url, params={"run_id": run_id.strip()}, timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
+                    data = _enrich_activities(data, client)
                     return JSONResponse(status_code=200, content=data)
         except Exception as e:
             logger.warning(f"Failed to fetch activities from {url}: {e}")

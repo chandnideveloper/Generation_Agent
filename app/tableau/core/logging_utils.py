@@ -68,18 +68,28 @@ _request_token_ctx = contextvars.ContextVar("request_token", default=None)
 _project_id_ctx = contextvars.ContextVar("project_id", default="System")
 _workbook_id_ctx = contextvars.ContextVar("workbook_id", default="System")
 _run_id_ctx = contextvars.ContextVar("run_id", default="System")
+_project_name_ctx = contextvars.ContextVar("project_name", default=None)
 
 def set_log_token(token: str):
     """Sets the Bearer token for the current request context."""
     _request_token_ctx.set(token)
 
-def set_logging_context(project_id: str, workbook_id: str, run_id: str):
+def set_logging_context(project_id: str, workbook_id: str, run_id: str, project_name: Optional[str] = None):
     """Sets the context for logging IDs."""
-    print(f"DEBUG: [logging_utils] Setting context: {project_id}, {workbook_id}, {run_id}")
+    print(f"DEBUG: [logging_utils] Setting context: {project_id}, {workbook_id}, {run_id}, project_name={project_name}")
     _project_id_ctx.set(project_id)
     _workbook_id_ctx.set(workbook_id)
     _run_id_ctx.set(run_id)
-    print(f"DEBUG: [logging_utils] Current _project_id_ctx.get(): {_project_id_ctx.get()}")
+    if project_name:
+        _project_name_ctx.set(str(project_name).strip())
+
+def set_project_name_context(project_name: str):
+    """Dynamically sets the active project name context."""
+    if project_name:
+        _project_name_ctx.set(str(project_name).strip())
+
+def get_project_name() -> Optional[str]:
+    return _project_name_ctx.get()
 
 def get_log_token() -> Optional[str]:
     """Retrieves the current Bearer token."""
@@ -168,7 +178,7 @@ def fire_and_forget_log(payload: Dict):
 
 # --- 1. Core Logging Logic ---
 
-def build_payload(level: str, message: str, details: Any = None, project_id=None, run_id=None):
+def build_payload(level: str, message: str, details: Any = None, project_id=None, run_id=None, project_name=None):
     """
     Constructs the JSON payload for the MongoDB API.
     Retrieves project_id and run_id from context if not provided.
@@ -177,6 +187,7 @@ def build_payload(level: str, message: str, details: Any = None, project_id=None
     p_id = project_id or _project_id_ctx.get()
     r_id = run_id or _run_id_ctx.get()
     w_id = _workbook_id_ctx.get()
+    p_name = project_name or _project_name_ctx.get() or p_id
 
     # [FIX] Ensure details is always a dict to prevent 422 Unprocessable Entity errors
     # If it's a string, wrap it in a dict.
@@ -185,7 +196,7 @@ def build_payload(level: str, message: str, details: Any = None, project_id=None
     
     return {
         "id": str(uuid.uuid4()),
-        "project_name": p_id,
+        "project_name": p_name,
         "project_id": p_id,
         "run_id": r_id,
         "run_no": r_id,
@@ -245,11 +256,18 @@ async def save_result_to_api(result_data: Dict[str, Any]):
     await log_action_to_api(f"[Storage] Saving results to MongoDB", result_data.get("project_id"))
 
     # Construct Payload
+    resolved_proj_name = (
+        result_data.get("new_app_name")
+        or result_data.get("project_name")
+        or (result_data.get("project") or {}).get("name")
+        or _project_name_ctx.get()
+        or result_data.get("project_id", "Unknown")
+    )
     payload = {
         "run_id": result_data.get("run_id", "Unknown"),
         "project_id": result_data.get("project_id", "Unknown"),
         "workbook_id": result_data.get("workbook_id", "Unknown"),
-        "project_name": result_data.get("project_id", "Unknown"),
+        "project_name": resolved_proj_name,
         "status": "completed",
         "payload": result_data
     }

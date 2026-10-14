@@ -34,6 +34,7 @@ async def log_action_to_api(
             summary=action_desc,
             status="success",
             source_type="qlik",
+            project_name=project_name,
         )
     except Exception as e:
         logger.debug(f"[GenLogger] Action logging to QT2F.agent_actions failed: {e}")

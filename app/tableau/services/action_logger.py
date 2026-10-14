@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 class ActionLogger:
     def __init__(self):
-        self.agent_name = "GenerationAgent"
+        self.agent_name = "Generation Agent"
+        self.project_name = None
         
         self.llm_client = None
         if Config.AZURE_OPENAI_API_KEY and Config.AZURE_OPENAI_ENDPOINT:
@@ -42,32 +43,53 @@ class ActionLogger:
             log_error(f"[ActionLogger] LLM failed: {e}")
             return str(user_prompt)
 
-    async def send_activity_to_api(self, project_id, workbook_id, run_id, technical_message, token=None):
-        """Generates a summary and sends it to Cosmos DB."""
+    async def send_activity_to_api(self, project_id, workbook_id, run_id, technical_message, token=None, project_name=None):
+        """Generates a summary and sends it to Cosmos DB / MongoDB."""
         summary = await self._generate_llm_content(
             "Summarize this action in <100 chars:", technical_message
         )
+        from app.tableau.core.logging_utils import get_project_name
+        resolved_proj_name = (
+            project_name
+            or self.project_name
+            or get_project_name()
+            or os.getenv("PROJECT_NAME")
+            or "Unknown"
+        )
         payload = {
             "id": str(uuid.uuid4()),
+            "project_name": resolved_proj_name,
             "run_id": run_id,
+            "run_no": run_id,
             "status": "success",
             "created_at": datetime.datetime.utcnow().isoformat(),
             "activity_summary": summary,
             "project_id": project_id,
             "workbook_id": workbook_id,
             "agent_name": self.agent_name,
-            "type": "agent_activity"
+            "type": "agent_activity",
+            "payload": {}
         }
         run_background_task(self._do_post(payload), task_name="send_activity_to_api")
 
-    async def send_error_to_api(self, project_id, workbook_id, run_id, technical_message, error_detail=None, token=None):
-        """Logs an error event to Cosmos DB with an LLM-generated summary."""
+    async def send_error_to_api(self, project_id, workbook_id, run_id, technical_message, error_detail=None, token=None, project_name=None):
+        """Logs an error event to Cosmos DB / MongoDB with an LLM-generated summary."""
         summary = await self._generate_llm_content(
             "Summarize this error in <100 chars:", technical_message
         )
+        from app.tableau.core.logging_utils import get_project_name
+        resolved_proj_name = (
+            project_name
+            or self.project_name
+            or get_project_name()
+            or os.getenv("PROJECT_NAME")
+            or "Unknown"
+        )
         payload = {
             "id": str(uuid.uuid4()),
+            "project_name": resolved_proj_name,
             "run_id": run_id,
+            "run_no": run_id,
             "status": "error",
             "created_at": datetime.datetime.utcnow().isoformat(),
             "activity_summary": summary,
@@ -75,7 +97,8 @@ class ActionLogger:
             "project_id": project_id,
             "workbook_id": workbook_id,
             "agent_name": self.agent_name,
-            "type": "agent_activity"
+            "type": "agent_activity",
+            "payload": {}
         }
         run_background_task(self._do_post(payload), task_name="send_error_to_api")
 
@@ -87,13 +110,14 @@ class ActionLogger:
                 log_warning(f"[ActionLogger] Activity payload failed contract validation: {ve}. Sending raw.")
                 validated_payload = payload
 
-            # Direct MongoDB insert strictly into QT2F_Tableau.agent_actions
+            # Direct MongoDB insert strictly into QT2F_Tableau.agent_actions and QT2F_Tableau.activities
             mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
             if mongo_uri and mongo_uri.startswith("mongodb"):
                 try:
                     import pymongo
                     client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
                     client["QT2F_Tableau"]["agent_actions"].insert_one(dict(validated_payload))
+                    client["QT2F_Tableau"]["activities"].insert_one(dict(validated_payload))
                 except Exception as pe:
                     logger.debug(f"[ActionLogger] Direct MongoDB insert failed: {pe}")
 

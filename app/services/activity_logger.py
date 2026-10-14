@@ -20,6 +20,30 @@ def get_tableau_mongo_url() -> str:
     url = os.getenv("MONGODB_URL", "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws")
     return url.rstrip("/")
 
+def _resolve_project_name(project_name: Optional[str] = None) -> str:
+    """Dynamically resolve project_name from parameter, contextvars, or environment."""
+    if project_name and str(project_name).strip() and str(project_name).strip() not in ("Unknown", "null", "None"):
+        return str(project_name).strip()
+    try:
+        from app.tableau.core.logging_utils import get_project_name
+        ctx_tb = get_project_name()
+        if ctx_tb and ctx_tb not in ("Unknown", "null", "None"):
+            return str(ctx_tb).strip()
+    except Exception:
+        pass
+    try:
+        from app.qlik.util.logging_utils import _qlik_project_name_ctx
+        ctx_ql = _qlik_project_name_ctx.get()
+        if ctx_ql and ctx_ql not in ("Unknown", "null", "None"):
+            return str(ctx_ql).strip()
+    except Exception:
+        pass
+    env_name = os.getenv("PROJECT_NAME")
+    if env_name and env_name not in ("Unknown", "null", "None"):
+        return str(env_name).strip()
+    return "Unknown"
+
+
 async def log_activity_async(
     run_id: str,
     project_id: str,
@@ -27,6 +51,7 @@ async def log_activity_async(
     summary: str,
     status: str = "running",
     source_type: str = "tableau",
+    project_name: Optional[str] = None,
 ) -> None:
     """
     Log an agent action strictly into the 'agent_actions' collection of the corresponding database:
@@ -40,10 +65,13 @@ async def log_activity_async(
     if not workbook_id:
         workbook_id = "unknown"
         
+    eff_project_name = _resolve_project_name(project_name)
+
     payload = {
         "run_id": run_id,
         "run_no": run_id,
-        "agent_name": f"{'Qlik' if source_type == 'qlik' else 'Tableau'} Generation Agent",
+        "project_name": eff_project_name,
+        "agent_name": "Generation Agent",
         "activity_summary": summary,
         "action": summary,
         "status": status,
@@ -52,17 +80,19 @@ async def log_activity_async(
         "workbook_id": workbook_id,
         "app_id": workbook_id,
         "type": "agent_action",
+        "payload": {},
     }
     
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
 
-    # 1. Direct MongoDB insertion strictly to target_db.agent_actions
+    # 1. Direct MongoDB insertion strictly to target_db.agent_actions and target_db.activities
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     if mongo_uri and mongo_uri.startswith("mongodb"):
         try:
             import pymongo
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
             client[target_db]["agent_actions"].insert_one(dict(payload))
+            client[target_db]["activities"].insert_one(dict(payload))
             return
         except Exception as err:
             logger.debug(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")
@@ -85,6 +115,7 @@ def log_activity_sync(
     summary: str,
     status: str = "running",
     source_type: str = "tableau",
+    project_name: Optional[str] = None,
 ) -> None:
     """
     Log an agent action strictly into the 'agent_actions' collection of the corresponding database (fire-and-forget).
@@ -95,11 +126,14 @@ def log_activity_sync(
         project_id = "unknown"
     if not workbook_id:
         workbook_id = "unknown"
+
+    eff_project_name = _resolve_project_name(project_name)
         
     payload = {
         "run_id": run_id,
         "run_no": run_id,
-        "agent_name": f"{'Qlik' if source_type == 'qlik' else 'Tableau'} Generation Agent",
+        "project_name": eff_project_name,
+        "agent_name": "Generation Agent",
         "activity_summary": summary,
         "action": summary,
         "status": status,
@@ -108,6 +142,7 @@ def log_activity_sync(
         "workbook_id": workbook_id,
         "app_id": workbook_id,
         "type": "agent_action",
+        "payload": {},
     }
     
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
@@ -119,6 +154,7 @@ def log_activity_sync(
                 import pymongo
                 client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
                 client[target_db]["agent_actions"].insert_one(dict(payload))
+                client[target_db]["activities"].insert_one(dict(payload))
                 return
             except Exception as err:
                 logger.debug(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")

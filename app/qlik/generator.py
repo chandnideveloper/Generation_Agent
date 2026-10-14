@@ -79,7 +79,7 @@ def _log_action_sync(action: str, request: GenerateRequest, app_name: str, detai
     run_id = request.run_id or "unknown"
     workspace_id = request.workspace_id or request.space_id or "personal"
     app_id = request.app_id or "unknown"
-    log_activity_sync(run_id, workspace_id, app_id, action, status="success", source_type="qlik")
+    log_activity_sync(run_id, workspace_id, app_id, action, status="success", source_type="qlik", project_name=app_name)
 
 
 def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict[str, Any]:
@@ -118,7 +118,9 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
         run_id=request.run_id or "unknown",
         project_id=request.space_id or "unknown",
         workbook_id=request.app_id or "unknown",
-        summary="Building TMDL semantic model."
+        summary="Building TMDL semantic model.",
+        source_type="qlik",
+        project_name=app_name,
     )
     _log_action_sync("Generating Power BI TMDL model & semantic relationships", request, app_name, f"Starting generation for app {app_name}")
 
@@ -165,7 +167,9 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
             run_id=request.run_id or "unknown",
             project_id=request.space_id or "unknown",
             workbook_id=request.app_id or "unknown",
-            summary="Generating Power BI visual layouts (PBIR) from source sheets."
+            summary="Generating Power BI visual layouts (PBIR) from source sheets.",
+            source_type="qlik",
+            project_name=app_name,
         )
         _log_action_sync("Generating PBIR visual layout & JSON definitions", request, app_name, "Building PBIR visual definitions")
         report_files, notes, report_stats = build_report(
@@ -456,7 +460,9 @@ def _deploy(
                 run_id=request.run_id or "unknown",
                 project_id=request.space_id or "unknown",
                 workbook_id=request.app_id or "unknown",
-                summary="Deploying generated Power BI project to Microsoft Fabric."
+                summary="Deploying generated Power BI project to Microsoft Fabric.",
+                source_type="qlik",
+                project_name=app_name,
             )
             ws = request.workspace_id
             tok = request.fabric_access_token

@@ -63,6 +63,22 @@ class MigrationOrchestrator:
             project_id = request.source.get("project_id", "unknown")
             workbook_id = request.source.get("workbook_id", "unknown")
 
+        # Resolve initial project name dynamically
+        dynamic_project_name = (
+            request.source.get("project_name")
+            or request.source.get("folder_name")
+            or request.source.get("app_name")
+            or request.source.get("workbook_name")
+            or getattr(request, "folder_name", None)
+            or getattr(request, "project_name", None)
+        )
+        if source_type == "tableau" and dynamic_project_name:
+            from app.tableau.core.logging_utils import set_logging_context
+            set_logging_context(project_id, workbook_id, request.run_id, project_name=dynamic_project_name)
+        elif source_type == "qlik" and dynamic_project_name:
+            from app.qlik.util.logging_utils import set_qlik_logging_context
+            set_qlik_logging_context(run_id=request.run_id, space_id=project_id, app_id=workbook_id, project_name=dynamic_project_name)
+
         # Agent Action: Stage 1
         await log_activity_async(
             run_id=request.run_id,
@@ -70,6 +86,7 @@ class MigrationOrchestrator:
             workbook_id=workbook_id,
             summary="Report Generation started.",
             source_type=source_type,
+            project_name=dynamic_project_name,
         )
 
         try:
@@ -86,6 +103,17 @@ class MigrationOrchestrator:
             await self._save_failure_record(request, source_type, project_id, workbook_id, str(gen_err))
             raise
 
+        # Resolve finalized project name from final_res or raw_result
+        if isinstance(raw_result, dict) and raw_result.get("new_app_name"):
+            dynamic_project_name = raw_result["new_app_name"]
+        elif hasattr(final_res, "details") and isinstance(final_res.details, dict):
+            proj_dict = final_res.details.get("project")
+            if isinstance(proj_dict, dict) and proj_dict.get("name"):
+                dynamic_project_name = proj_dict.get("name")
+        if source_type == "tableau" and dynamic_project_name:
+            from app.tableau.core.logging_utils import set_project_name_context
+            set_project_name_context(dynamic_project_name)
+
         # Agent Action: Stage 5
         if final_res.status == "success":
             await log_activity_async(
@@ -94,6 +122,7 @@ class MigrationOrchestrator:
                 workbook_id=workbook_id,
                 summary="Report Generation completed successfully.",
                 source_type=source_type,
+                project_name=dynamic_project_name,
             )
 
         # Persist generation record in MongoDB strictly into target database and collection
@@ -122,7 +151,7 @@ class MigrationOrchestrator:
                     "run_id": str(request.run_id).strip(),
                     "project_id": str(project_id).strip(),
                     "workbook_id": str(workbook_id).strip(),
-                    "project_name": str(project_id or workbook_id).strip(),
+                    "project_name": str(dynamic_project_name or project_id or workbook_id).strip(),
                     "status": "completed" if final_res.status == "success" else "failed",
                     "created_at": now_iso,
                     "updated_at": now_iso,
@@ -199,6 +228,7 @@ class MigrationOrchestrator:
                     "space_name": eff_space,
                     "project_id": eff_space,
                     "workbook_id": eff_app,
+                    "project_name": str(dynamic_project_name or eff_app).strip(),
                     "status": "completed" if final_res.status == "success" else "failed",
                     "created_at": now_iso,
                     "updated_at": now_iso,

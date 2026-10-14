@@ -34,7 +34,9 @@ class CosmosLogRecord(BaseModel):
 
 class CosmosActivityRecord(BaseModel):
     id: str
+    project_name: Optional[str] = None
     run_id: str
+    run_no: Optional[str] = None
     status: str
     created_at: str
     activity_summary: str
@@ -43,6 +45,7 @@ class CosmosActivityRecord(BaseModel):
     workbook_id: str
     agent_name: str
     type: str = "agent_activity"
+    payload: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class CosmosGenerationRecord(BaseModel):
     run_id: str

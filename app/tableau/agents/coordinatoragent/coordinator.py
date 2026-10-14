@@ -262,11 +262,17 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
         fabric_access_token = getattr(request, 'fabric_access_token', None)
         group_id = getattr(request, 'group_id', None)
 
+        initial_name = getattr(request, 'project_name', None) or target_folder or "Unknown_Project"
+        from app.tableau.core.logging_utils import set_logging_context, set_project_name_context
+        set_logging_context(project_id, workbook_id, run_id, project_name=initial_name)
+        self.action_logger.project_name = initial_name
+
         # --- LOG: WORKFLOW STARTED (WITH TOKEN) ---
         await self.action_logger.send_activity_to_api(
             project_id, workbook_id, run_id, 
             technical_message=f"Starting extraction for target folder: {target_folder} (DirectLake: {data_layer_triggered})",
-            token=token
+            token=token,
+            project_name=initial_name
         )
 
         api_headers = {"Content-Type": "application/json"}
@@ -359,6 +365,8 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                     or getattr(request, "folder_name", None)
                     or "Unknown_Project"
                 )
+                self.action_logger.project_name = raw_project_name
+                set_project_name_context(raw_project_name)
                 cleaned_name = re.sub(r'[^a-zA-Z0-9_\s]', '', raw_project_name)
                 cleaned_name = cleaned_name.replace(" ", "_")
                 sanitized_name = re.sub(r'_+', '_', cleaned_name).strip("_")
@@ -587,6 +595,8 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                 base_name = sanitized_name[:100].strip("_")
                 new_app_name = f"{base_name}_{timestamp}"
                 log_info(f"[CoordinatorAgent] Standardized Name: {new_app_name}")
+                self.action_logger.project_name = new_app_name
+                set_project_name_context(new_app_name)
 
                 clean_target = (target_folder or os.getenv("DESTINATION_BASE", "test-workspace")).strip("/ ")
                 if clean_target:
