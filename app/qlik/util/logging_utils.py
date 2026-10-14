@@ -60,28 +60,24 @@ def get_qlik_logging_context() -> Dict[str, str]:
 
 
 def save_log_to_mongodb(payload: Dict[str, Any]) -> None:
-    """Persist log entry to MongoDB 'QT2F' database, 'agent_logs' collection.
+    """Persist log entry to MongoDB 'QT2F' database, 'agent_logs' collection ONLY.
     
     Tries direct PyMongo connection if available, falling back to HTTP API endpoint.
     """
-    # 1. Direct MongoDB insert (QT2F database, agent_logs collection)
+    # 1. Direct MongoDB insert (QT2F database, agent_logs collection ONLY)
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     if mongo_uri and mongo_uri.startswith("mongodb"):
         try:
             import pymongo
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
             client["QT2F"]["agent_logs"].insert_one(dict(payload))
-            try:
-                client["QT2F"]["logs"].insert_one(dict(payload))
-            except Exception:
-                pass
             return
         except Exception:
             pass
 
-    # 2. HTTP API fallback (FastAPI JSON store on AWS Lambda / microservice)
+    # 2. HTTP API fallback strictly to Qlik storage microservice
     candidate_bases = []
-    for raw in [config.MONGO_API_URL, os.getenv("MONGO_API_URL"), os.getenv("TELEMETRY_LOCAL_API")]:
+    for raw in [config.MONGO_API_URL, os.getenv("MONGO_API_URL"), "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws"]:
         if raw and str(raw).startswith("http"):
             cleaned = str(raw).rstrip("/")
             if cleaned not in candidate_bases:

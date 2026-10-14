@@ -62,7 +62,6 @@ class Config:
     # ==========================================================================
     API_VERSION = "7.0"
     MONGODB_URL = os.getenv("MONGODB_URL", "")
-    COSMOS_DB_API_URL = os.getenv("COSMOS_DB_API_URL") or os.getenv("MONGODB_URL", "")
     MONGODB_DB_NAME = "QT2F_Tableau"
     KEYVAULT_API_URL = os.getenv("KEYVAULT_API_URL", "")
     DEPLOYMENT_SETTINGS_API_URL = os.getenv("DEPLOYMENT_SETTINGS_API_URL", "")
@@ -148,7 +147,7 @@ if Config.MONGODB_URL:
                     route = "mapping"
                 elif self.name == "data_layer_results":
                     route = "data-layer"
-                elif self.name == "activities":
+                elif self.name in ["activities", "agent_actions"]:
                     route = "activities"
                 elif self.name in ["logs", "agent_logs"]:
                     route = "logs"
@@ -217,7 +216,7 @@ if Config.MONGODB_URL:
                     route = "mapping"
                 elif self.name == "data_layer_results":
                     route = "data-layer"
-                elif self.name == "activities":
+                elif self.name in ["activities", "agent_actions"]:
                     route = "activities"
                 elif self.name in ["logs", "agent_logs"]:
                     route = "logs"

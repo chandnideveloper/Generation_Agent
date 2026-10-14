@@ -165,12 +165,13 @@ class TmdlGenerator:
             for pname in self._parameter_names:
                 clean = re.sub(rf'\[\s*{re.escape(pname)}\s*\]', f"SELECTEDVALUE('{pname}'[Value])", clean, flags=re.IGNORECASE)
 
-        # Ensure DAX is not only comments or an error string (which produces empty/invalid TMDL)
-        non_comment_lines = [l.strip() for l in clean.splitlines() if l.strip() and not l.strip().startswith('--') and not l.strip().startswith('//')]
-        if not non_comment_lines or clean.strip().startswith('-- ERROR:'):
+        # Validate that clean is an actual executable DAX expression and not just error text or comment lines
+        lines = [l.strip() for l in clean.splitlines() if l.strip()]
+        non_comments = [l for l in lines if not l.startswith('--') and not l.startswith('//')]
+        if not non_comments or any("LLM call failed" in l or "413 Client Error" in l or "Payload Too Large" in l for l in lines):
             return "BLANK()"
 
-        return clean
+        return clean or "BLANK()"
 
     def _normalize_table_name(self, name: str) -> str:
         if not name:
@@ -1699,16 +1700,14 @@ class TmdlGenerator:
             dax = self._clean_dax(str(raw_dax), is_parameter=True) if raw_dax else ""
             
             ref_column = "Value"
-            ref_table = name
-            source_column_str = f"[{ref_column}]"
+            source_column_str = "[Value]"
             match = re.search(r"'?([a-zA-Z0-9_ -]+)'?\[([a-zA-Z0-9_ -]+)\]", clean_dax)
             if match:
                 ref_table = match.group(1)
                 ref_column = match.group(2)
-                safe_ref_table = f"'{ref_table}'" if " " in ref_table else ref_table
-                source_column_str = f"{safe_ref_table}[{ref_column}]"
+                source_column_str = f"{ref_table}[{ref_column}]"
             
-            default = pbi_data.get("current_value") or param.get("suggested_default", "0")
+            default = pbi_data.get("current_value") or param.get("current_value") or param.get("suggested_default", "0")
             data_type = pbi_data.get("data_type") or param.get("data_type", "integer")
             data_type = str(data_type).lower()
 
@@ -1793,9 +1792,6 @@ class TmdlGenerator:
                             self._model_measures.add(m_lower)
                         raw_meas_dax = tc.get("dax_formula") or tc.get("powerbi_formula") or "1"
                         cleaned_meas_dax = self._clean_dax(raw_meas_dax)
-                        non_comment_lines = [l.strip() for l in cleaned_meas_dax.splitlines() if l.strip() and not l.strip().startswith('--') and not l.strip().startswith('//')]
-                        if not non_comment_lines or cleaned_meas_dax.strip().startswith('-- ERROR:'):
-                            cleaned_meas_dax = "BLANK()"
                         measure_blocks.append(f"""    measure '{measure_name}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                         log_info(f"[add_parameters] Using '{measure_name}' as measure for parameter '{name}'")
@@ -1813,9 +1809,6 @@ class TmdlGenerator:
                         self._model_measures.add(m_lower)
                     raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "1"
                     cleaned_meas_dax = self._clean_dax(raw_meas_dax)
-                    non_comment_lines = [l.strip() for l in cleaned_meas_dax.splitlines() if l.strip() and not l.strip().startswith('--') and not l.strip().startswith('//')]
-                    if not non_comment_lines or cleaned_meas_dax.strip().startswith('-- ERROR:'):
-                        cleaned_meas_dax = "BLANK()"
                     measure_blocks.append(f"""    measure '{measure_name}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                     log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")

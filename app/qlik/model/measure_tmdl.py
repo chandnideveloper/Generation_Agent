@@ -138,7 +138,13 @@ def _clean_dax(dax_expr: str) -> str:
 
     cleaned = re.sub(r"'([A-Za-z0-9_]+)-\d+'", r"'\1'", cleaned)
     cleaned = re.sub(r"'([A-Za-z0-9_]+)_Raw'", r"'\1'", cleaned, flags=re.IGNORECASE)
-    return cleaned
+
+    lines = [l.strip() for l in cleaned.splitlines() if l.strip()]
+    non_comments = [l for l in lines if not l.startswith('--') and not l.startswith('//')]
+    if not non_comments or any("LLM call failed" in l or "413 Client Error" in l or "Payload Too Large" in l for l in lines):
+        return "BLANK()"
+
+    return cleaned or "BLANK()"
 
 
 def _resolve_format_string(fmt_obj: Any) -> Optional[str]:

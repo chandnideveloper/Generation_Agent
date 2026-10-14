@@ -186,12 +186,24 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
             if workbook_id:
                 query["workbook_id"] = workbook_id
 
-            # Ensure payload is trimmed of massive raw file trees for safe MongoDB/Cosmos persistence
+            # If completed, clean up any previous failed record so stale failures never linger
+            if status == "completed":
+                try:
+                    del_query = {"run_id": run_id}
+                    if project_id:
+                        del_query["project_id"] = project_id
+                    if workbook_id:
+                        del_query["workbook_id"] = workbook_id
+                    await mongo_db["generation_results"].delete_many(del_query)
+                except Exception as de:
+                    log_warning(f"[CoordinatorAgent] Could not clean up failed generation records: {de}")
+
+            # Try saving record; if payload is large (> 500KB) strip raw trees to guarantee HTTP/Lambda delivery
             import json as _json
             try:
                 dumped_size = len(_json.dumps(record.get("payload", {})))
-                if dumped_size > 200_000:
-                    log_info(f"[CoordinatorAgent] Payload size {dumped_size} bytes exceeds 200KB; pruning raw file trees for safe persistence")
+                if dumped_size > 500_000:
+                    log_info(f"[CoordinatorAgent] Payload size {dumped_size} bytes exceeds 500KB; pruning raw file trees for safe persistence")
                     p = record.get("payload", {})
                     record["payload"] = {
                         "final_response": p.get("final_response", {}),
@@ -204,8 +216,18 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
             except Exception:
                 pass
 
-            await mongo_db["generation"].update_one(query, {"$set": record}, upsert=True)
-            log_info(f"[CoordinatorAgent] Successfully upserted generation record | Status: {status}")
+            # Direct MongoDB insert strictly into QT2F_Tableau.generation_results
+            mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+            if mongo_uri and mongo_uri.startswith("mongodb"):
+                try:
+                    import pymongo
+                    client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+                    client["QT2F_Tableau"]["generation_results"].update_one(query, {"$set": record}, upsert=True)
+                except Exception as pe:
+                    log_warning(f"[CoordinatorAgent] Direct PyMongo update to QT2F_Tableau.generation_results failed: {pe}")
+
+            await mongo_db["generation_results"].update_one(query, {"$set": record}, upsert=True)
+            log_info(f"[CoordinatorAgent] Successfully upserted generation record to QT2F_Tableau.generation_results | Status: {status}")
         except Exception as e:
             log_error(f"[CoordinatorAgent] Failed to save generation record to MongoDB: {e}")
 
@@ -1482,6 +1504,8 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
             "message": f"PBIX project generated and deployed successfully. | Response saved to DB location: {fetch_location}",
             "db_location": fetch_location,
             "fetch_url": fetch_location,
+            "database": "QT2F_Tableau",
+            "collection": "generation_results",
             "project": project_metadata,
             "summary": {
                 "pages_generated": len(pages),

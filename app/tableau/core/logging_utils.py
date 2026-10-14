@@ -90,26 +90,21 @@ import requests
 _TABLEAU_LOG_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tableau-mongo-log")
 
 def _save_tableau_log_sync(payload: Dict):
-    """Synchronously persist log entry to QT2F_Tableau database, agent_logs collection."""
+    """Synchronously persist log entry to QT2F_Tableau database, agent_logs collection ONLY."""
     # 1. Direct MongoDB insert if MONGO_URI / MONGODB_URL is mongodb:// connection
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     if mongo_uri and mongo_uri.startswith("mongodb"):
         try:
             import pymongo
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-            for db_name in ["QT2F_Tableau", "QT2F_Tablaue"]:
-                try:
-                    client[db_name]["agent_logs"].insert_one(dict(payload))
-                    client[db_name]["logs"].insert_one(dict(payload))
-                except Exception:
-                    pass
+            client["QT2F_Tableau"]["agent_logs"].insert_one(dict(payload))
             return
         except Exception as pe:
             pass
 
     # 2. HTTP Proxy endpoint fallback
     candidate_bases = []
-    for raw in [os.getenv("MONGODB_URL"), getattr(Config, "MONGODB_URL", None)]:
+    for raw in [os.getenv("MONGODB_URL"), getattr(Config, "MONGODB_URL", None), "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws"]:
         if raw and str(raw).startswith("http"):
             b = str(raw).rstrip("/")
             if b not in candidate_bases:
@@ -127,8 +122,7 @@ def _save_tableau_log_sync(payload: Dict):
 
 async def _do_post_log(payload: Dict):
     """
-    Internal helper to send the log to MongoDB asynchronously.
-    Persists to QT2F_Tableau database in agent_logs collection.
+    Internal helper to send the log strictly to QT2F_Tableau database in agent_logs collection.
     """
     try:
         try:
@@ -137,31 +131,19 @@ async def _do_post_log(payload: Dict):
             logger.warning(f"[Log Storage] Payload failed contract validation: {ve}. Sending raw payload.")
             validated_payload = payload
 
-        # 1. Direct MongoDB insertion if MONGO_URI / MONGODB_URL is mongodb:// connection
+        # 1. Direct MongoDB insertion strictly into QT2F_Tableau.agent_logs
         mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
         if mongo_uri and mongo_uri.startswith("mongodb"):
             try:
                 import pymongo
                 client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-                for db_name in ["QT2F_Tableau", "QT2F_Tablaue"]:
-                    try:
-                        client[db_name]["agent_logs"].insert_one(dict(validated_payload))
-                        client[db_name]["logs"].insert_one(dict(validated_payload))
-                    except Exception:
-                        pass
+                client["QT2F_Tableau"]["agent_logs"].insert_one(dict(validated_payload))
             except Exception as pe:
                 logger.debug(f"[Log Storage] Direct MongoDB insert failed: {pe}")
 
-        # 2. Async Client / HTTP Proxy
+        # 2. Async Client / HTTP Proxy strictly into agent_logs
         if mongo_db is not None:
-            try:
-                await mongo_db["agent_logs"].insert_one(validated_payload)
-            except Exception:
-                pass
-            try:
-                await mongo_db["logs"].insert_one(validated_payload)
-            except Exception:
-                pass
+            await mongo_db["agent_logs"].insert_one(validated_payload)
         else:
             logger.warning("[Log Storage] MONGODB_URL not configured. Skipping save.")
     except Exception as e:
@@ -279,19 +261,33 @@ async def save_result_to_api(result_data: Dict[str, Any]):
             logger.warning(f"[Storage] Generation payload failed contract validation: {ve}. Sending raw.")
             validated_payload = payload
 
-        await mongo_db["generation"].insert_one(validated_payload)
+        # Direct PyMongo insertion strictly to QT2F_Tableau.generation_results
+        mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+        if mongo_uri and mongo_uri.startswith("mongodb"):
+            try:
+                import pymongo
+                client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+                client["QT2F_Tableau"]["generation_results"].update_one(
+                    {"run_id": str(payload.get("run_id", "")).strip()},
+                    {"$set": validated_payload},
+                    upsert=True
+                )
+            except Exception:
+                pass
+
+        await mongo_db["generation_results"].insert_one(validated_payload)
         await log_action_to_api("[Storage] Successfully saved result")
     except Exception as e:
         err_msg = f"Failed to save result to MongoDB: {str(e)}"
         await log_error_to_api(f"[Storage] {err_msg}")
-        store_deadletter("mongodb://generation", payload, err_msg)
+        store_deadletter("mongodb://generation_results", payload, err_msg)
 
 # --- 5. Replaced `send_log_to_api` Function ---
 async def send_log_to_api(self, project_id: str, workbook_id: str, run_id: str, log_level: str, message: str, details: Optional[Dict[str, Any]] = None):
     """
     Sends a log entry to the Centralized MongoDB API (Fire-and-forget).
     """
-    base_url = getattr(Config, "MONGODB_URL", None) or os.getenv("MONGODB_URL", "")
+    base_url = COSMOS_DB_API_URL
     if not base_url: return
 
     api_url = f"{base_url.rstrip('/')}/api/records/logs"

@@ -87,31 +87,22 @@ class ActionLogger:
                 log_warning(f"[ActionLogger] Activity payload failed contract validation: {ve}. Sending raw.")
                 validated_payload = payload
 
-            # Direct MongoDB insert if MONGO_URI / MONGODB_URL is mongodb:// connection
+            # Direct MongoDB insert strictly into QT2F_Tableau.agent_actions
             mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
             if mongo_uri and mongo_uri.startswith("mongodb"):
                 try:
                     import pymongo
                     client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-                    for db_name in ["QT2F_Tableau", "QT2F_Tablaue"]:
-                        try:
-                            client[db_name]["agent_logs"].insert_one(dict(validated_payload))
-                            client[db_name]["activities"].insert_one(dict(validated_payload))
-                        except Exception:
-                            pass
+                    client["QT2F_Tableau"]["agent_actions"].insert_one(dict(validated_payload))
                 except Exception as pe:
                     logger.debug(f"[ActionLogger] Direct MongoDB insert failed: {pe}")
 
             if mongo_db is not None:
-                try:
-                    await mongo_db["agent_logs"].insert_one(validated_payload)
-                except Exception:
-                    pass
-                await mongo_db["activities"].insert_one(validated_payload)
-                log_info(f"[ActionLogger] Successfully posted activity to MongoDB")
+                await mongo_db["agent_actions"].insert_one(validated_payload)
+                log_info(f"[ActionLogger] Successfully posted action to QT2F_Tableau.agent_actions")
             else:
                 log_warning("[ActionLogger] MONGODB_URL not configured. Skipping save.")
         except Exception as e:
             err_msg = f"Failed to post to MongoDB: {e}"
             log_error(f"[ActionLogger] {err_msg}")
-            store_deadletter("mongodb://agent_logs", payload, err_msg)
+            store_deadletter("mongodb://agent_actions", payload, err_msg)

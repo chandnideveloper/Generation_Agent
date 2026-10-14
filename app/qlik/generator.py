@@ -56,7 +56,7 @@ def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (2,
     bases = [
         os.getenv("TELEMETRY_LOCAL_API"),
         config.MONGO_API_URL,
-        os.getenv("MONGO_API_URL"),
+        os.getenv("MONGODB_URL"),
     ]
     for base in bases:
         if not base:
@@ -74,14 +74,12 @@ def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (2,
 
 
 def _log_action_sync(action: str, request: GenerateRequest, app_name: str, details: str = "") -> None:
-    """Record one agent action for the run's activity trail and QT2F.agent_logs."""
+    """Record one agent action for the run's activity trail strictly into QT2F.agent_actions."""
     from app.services.activity_logger import log_activity_sync
-    from app.qlik.util.logging_utils import log_qlik_info
     run_id = request.run_id or "unknown"
     workspace_id = request.workspace_id or request.space_id or "personal"
     app_id = request.app_id or "unknown"
     log_activity_sync(run_id, workspace_id, app_id, action, status="success", source_type="qlik")
-    log_qlik_info(f"ACTION: {action} | {details}", details={"action": action, "app_name": app_name, "info": details})
 
 
 def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict[str, Any]:
@@ -333,21 +331,28 @@ def generate(mapping_document: Dict[str, Any], request: GenerateRequest) -> Dict
 
 
 def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name: str) -> str:
-    """Persist the generation result in the MongoDB microservice."""
+    """Persist the generation result in the MongoDB microservice (QT2F.generation_results)."""
     import requests
     clean_app_id = re.sub(r"[\s_]+", "-", str(request.app_id or "").strip())
-    eff_space = request.space_id or request.workspace_id or "personal"
-    eff_app = clean_app_id or request.app_id
+    eff_space = str(request.space_id or request.workspace_id or "personal").strip()
+    eff_app = clean_app_id or str(request.app_id).strip()
+    
+    qlik_base = (config.MONGO_API_URL or os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws").rstrip('/')
+    db_location = f"{qlik_base}/api/records/generation?run_id={request.run_id}&app_id={eff_app}&space_id={eff_space}"
+
     doc = {
-        "run_id": request.run_id,
+        "run_id": str(request.run_id).strip(),
         "space_id": eff_space,
         "app_id": eff_app,
-        "space_name": request.space_id or "Unknown",
-        # Compatible aliases for unified and Tableau endpoints
+        "space_name": str(request.space_id or "personal").strip(),
         "project_id": eff_space,
         "workbook_id": eff_app,
-        "project_name": app_name or request.app_id or "Unknown",
-        "status": "completed" if str(result.get("status", "")).lower() in ("success", "completed", "ok") else "partial_success",
+        "project_name": app_name or str(request.app_id or "Unknown").strip(),
+        "status": "completed" if str(result.get("status", "")).lower() in ("success", "completed", "ok") else "failed",
+        "db_location": db_location,
+        "fetch_url": db_location,
+        "database": "QT2F",
+        "collection": "generation_results",
         "payload": {
             "app_name": app_name,
             "folder_name": request.department_repo or "Qlik_Migrated",
@@ -366,30 +371,36 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
         },
     }
 
-    # Attempt immediate synchronous save to Qlik MongoDB endpoints
-    saved = False
-    for base in [config.MONGO_API_URL, os.getenv("MONGO_API_URL")]:
-        if not base:
-            continue
-        url = f"{base.rstrip('/')}/api/records/generation"
+    # 1. Direct MongoDB insert if MONGO_URI / MONGODB_URL is mongodb:// connection
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+    if mongo_uri and mongo_uri.startswith("mongodb"):
         try:
-            res = requests.post(url, json=doc, timeout=10)
-            if res.status_code in (200, 201):
-                logger.info(f"Successfully saved generation result directly to {url}")
-                saved = True
-            else:
-                logger.warning(f"Post to {url} returned {res.status_code}: {res.text[:100]}")
-        except Exception as e:
-            logger.warning(f"Direct post to {url} failed: {e}")
+            import pymongo
+            client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+            client["QT2F"]["generation_results"].update_one(
+                {"run_id": str(request.run_id).strip()},
+                {"$set": doc},
+                upsert=True
+            )
+        except Exception as pe:
+            logger.debug(f"[Qlik] Direct MongoDB insert to QT2F.generation_results failed: {pe}")
 
-    if not saved:
+    # 2. HTTP POST strictly to Qlik microservice (/api/records/generation)
+    target_url = f"{qlik_base}/api/records/generation"
+    try:
+        res = requests.post(target_url, json=doc, timeout=15)
+        if res.status_code in (200, 201):
+            logger.info(f"Successfully saved Qlik generation result to {target_url}")
+        else:
+            logger.warning(f"Post to {target_url} returned {res.status_code}: {res.text[:100]}")
+    except Exception as e:
+        logger.warning(f"Direct post to {target_url} failed: {e}")
         _TELEMETRY_POOL.submit(_post_with_fallback, "api/records/generation", doc, (2, 10))
 
-    base_url = config.MONGO_API_URL or os.getenv("MONGO_API_URL")
-    if base_url:
-        db_location = f"{base_url.rstrip('/')}/api/records/generation?run_id={request.run_id}&space_id={eff_space}&app_id={eff_app}"
-    else:
-        db_location = "QT2F.generation_results"
+    result["db_location"] = db_location
+    result["fetch_url"] = db_location
+    result["database"] = "QT2F"
+    result["collection"] = "generation_results"
     return db_location
 
 

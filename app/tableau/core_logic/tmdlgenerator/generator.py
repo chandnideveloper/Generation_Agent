@@ -109,10 +109,9 @@ class TmdlGenerator(TmdlHelperMixin):
             if match:
                 ref_table = match.group(1)
                 ref_column = match.group(2)
-                safe_ref_table = f"'{ref_table}'" if " " in ref_table else ref_table
-                source_column_str = f"{safe_ref_table}[{ref_column}]"
+                source_column_str = f"{ref_table}[{ref_column}]"
 
-            default = pbi_data.get("current_value") or param.get("suggested_default", "0")
+            default = pbi_data.get("current_value") or param.get("current_value") or param.get("suggested_default", "0")
             data_type = pbi_data.get("data_type") or param.get("data_type", "integer")
             data_type = str(data_type).lower()
 
@@ -188,18 +187,20 @@ class TmdlGenerator(TmdlHelperMixin):
             for tc in targeted_calcs:
                 tc_type = str(tc.get("type", "")).strip().lower()
                 if tc_type == "measure":
-                    measure_name = self._sanitize_name(tc.get("name", "CustomFilter"))
+                    raw_tc_name = tc.get("name", "CustomFilter")
+                    if not raw_tc_name or not str(raw_tc_name).strip() or str(raw_tc_name).strip() in ('""', "''", "None", "null"):
+                        continue
+                    measure_name = self._sanitize_name(raw_tc_name)
+                    if not measure_name or not measure_name.strip() or measure_name.strip() in ('""', "''", "None", "null"):
+                        continue
                     m_lower = measure_name.lower()
                     if m_lower not in seen_param_measures and m_lower not in existing_model_measures:
                         seen_param_measures.add(m_lower)
                         existing_model_measures.add(m_lower)
                         if hasattr(self, '_model_measures') and self._model_measures is not None:
                             self._model_measures.add(m_lower)
-                        raw_meas_dax = tc.get("dax_formula") or tc.get("powerbi_formula") or "1"
-                        cleaned_meas_dax = self._clean_dax(raw_meas_dax)
-                        non_comment = [l.strip() for l in cleaned_meas_dax.split('\n') if l.strip() and not (l.strip().startswith('--') or l.strip().startswith('//'))]
-                        if not non_comment or cleaned_meas_dax.strip().upper().startswith("-- ERROR:"):
-                            cleaned_meas_dax = "BLANK()"
+                        raw_meas_dax = tc.get("dax_formula") or tc.get("powerbi_formula") or "BLANK()"
+                        cleaned_meas_dax = self._clean_dax(raw_meas_dax) or "BLANK()"
                         measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                         log_info(f"[add_parameters] Using '{measure_name}' as measure for parameter '{name}'")
@@ -208,18 +209,20 @@ class TmdlGenerator(TmdlHelperMixin):
 
             # Add measures from top-level measures
             for m in mapped_measures:
-                measure_name = self._sanitize_name(m.get("name"))
+                raw_m_name = m.get("name")
+                if not raw_m_name or not str(raw_m_name).strip() or str(raw_m_name).strip() in ('""', "''", "None", "null"):
+                    continue
+                measure_name = self._sanitize_name(raw_m_name)
+                if not measure_name or not measure_name.strip() or measure_name.strip() in ('""', "''", "None", "null"):
+                    continue
                 m_lower = measure_name.lower()
                 if m_lower not in seen_param_measures and m_lower not in existing_model_measures:
                     seen_param_measures.add(m_lower)
                     existing_model_measures.add(m_lower)
                     if hasattr(self, '_model_measures') and self._model_measures is not None:
                         self._model_measures.add(m_lower)
-                    raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "1"
-                    cleaned_meas_dax = self._clean_dax(raw_meas_dax)
-                    non_comment = [l.strip() for l in cleaned_meas_dax.split('\n') if l.strip() and not (l.strip().startswith('--') or l.strip().startswith('//'))]
-                    if not non_comment or cleaned_meas_dax.strip().upper().startswith("-- ERROR:"):
-                        cleaned_meas_dax = "BLANK()"
+                    raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "BLANK()"
+                    cleaned_meas_dax = self._clean_dax(raw_meas_dax) or "BLANK()"
                     measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                     log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")
@@ -227,6 +230,10 @@ class TmdlGenerator(TmdlHelperMixin):
                     log_info(f"[add_parameters] Skipping duplicate measure '{measure_name}' on parameter '{name}' (already in model)")
 
             measure_block = "\n\n".join(measure_blocks)
+
+            # [FIX] Quote ref_table if it has spaces
+            safe_ref_table = f"'{ref_table}'" if " " in ref_table else ref_table
+            source_column_str = f"{safe_ref_table}[{ref_column}]"
 
             # [FIX] Escape table and column names in the main TMDL template
             tmdl = f"""table '{self._escape_tmdl_identifier(name)}'
@@ -298,8 +305,13 @@ class TmdlGenerator(TmdlHelperMixin):
 
             relationships = api_data.get('relationships', [])
             if not isinstance(relationships, list): relationships = []
-            measures = api_data.get('measures', [])
-            if not isinstance(measures, list): measures = []
+            measures = list(api_data.get('measures', []) or [])
+            for tbl in all_tables:
+                for tm in (tbl.get('measures') or []):
+                    if isinstance(tm, dict) and tm.get('name'):
+                        if not tm.get('table'):
+                            tm['table'] = tbl.get('table_name')
+                        measures.append(tm)
             measures = [m for m in measures if isinstance(m, dict) and m.get('name')]
             calcs = api_data.get('calculated_fields', [])
             if not isinstance(calcs, list): calcs = []

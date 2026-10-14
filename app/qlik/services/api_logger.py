@@ -20,32 +20,11 @@ async def log_action_to_api(
     project_name: str = None,
     token: str = None,
 ) -> None:
-    """Log an agent action to the external monitoring API and QT2F.agent_logs."""
+    """Log an agent action strictly to QT2F.agent_actions."""
     effective_run_id = run_id or app_id or "unknown"
     effective_space = workspace_id or "personal"
     effective_app = app_id or "unknown"
-    effective_proj = project_name or "Unknown"
 
-    log_payload = {
-        "id": str(uuid.uuid4()),
-        "run_id": effective_run_id,
-        "run_no": effective_run_id,
-        "project_name": effective_proj,
-        "project_id": effective_space,
-        "space_id": effective_space,
-        "workbook_id": effective_app,
-        "app_id": effective_app,
-        "agent_name": "Qlik Generation Agent",
-        "log_level": "INFO",
-        "message": action_desc,
-        "timestamp": datetime.datetime.utcnow().isoformat(),
-        "details": {"info": str(details)} if details else {},
-        "type": "agent_log",
-    }
-    # Fire and forget into QT2F.agent_logs
-    fire_and_forget_qlik_log(log_payload)
-
-    # Also log to activity logger
     from app.services.activity_logger import log_activity_async
     try:
         await log_activity_async(
@@ -54,7 +33,8 @@ async def log_action_to_api(
             workbook_id=effective_app,
             summary=action_desc,
             status="success",
+            source_type="qlik",
         )
     except Exception as e:
-        logger.debug(f"[GenLogger] Activity logging failed: {e}")
+        logger.debug(f"[GenLogger] Action logging to QT2F.agent_actions failed: {e}")
 

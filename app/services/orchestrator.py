@@ -90,11 +90,14 @@ class MigrationOrchestrator:
                 source_type=source_type,
             )
 
-        # Persist generation record in MongoDB synchronously before returning response
+        # Persist generation record in MongoDB strictly into target database and collection
         try:
             import os
             import requests
+            import re
             final_dict = final_res.model_dump() if hasattr(final_res, "model_dump") else dict(final_res)
+
+            mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
 
             if source_type == "tableau":
                 mongo_base = (os.getenv("MONGODB_URL") or "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws").rstrip("/")
@@ -105,8 +108,26 @@ class MigrationOrchestrator:
                     "workbook_id": str(workbook_id).strip(),
                     "project_name": str(project_id or workbook_id).strip(),
                     "status": "completed" if final_res.status == "success" else "failed",
+                    "db_location": final_res.db_location,
+                    "fetch_url": final_res.db_location,
+                    "database": "QT2F_Tableau",
+                    "collection": "generation_results",
                     "payload": final_dict,
                 }
+                # Direct PyMongo write to QT2F_Tableau.generation_results
+                if mongo_uri and mongo_uri.startswith("mongodb"):
+                    try:
+                        import pymongo
+                        client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+                        client["QT2F_Tableau"]["generation_results"].update_one(
+                            {"run_id": str(request.run_id).strip()},
+                            {"$set": tb_record},
+                            upsert=True
+                        )
+                    except Exception as pe:
+                        logger.debug(f"[Orchestrator] Direct PyMongo write failed: {pe}")
+
+                # Microservice write (PATCH then POST)
                 params = {
                     "run_id": str(request.run_id).strip(),
                     "project_id": str(project_id).strip(),
@@ -116,12 +137,8 @@ class MigrationOrchestrator:
                 try:
                     patch_resp = requests.patch(post_url, params=params, json=tb_record, timeout=15)
                     if patch_resp.status_code in (200, 204):
-                        logger.info(f"[Orchestrator] Successfully updated Tableau generation record in MongoDB at {post_url}")
+                        logger.info(f"[Orchestrator] Successfully updated Tableau generation record in QT2F_Tableau.generation_results via {post_url}")
                         saved = True
-                    elif patch_resp.status_code == 404:
-                        logger.info(f"[Orchestrator] Record not found on PATCH (404), creating via POST at {post_url}")
-                    else:
-                        logger.warning(f"[Orchestrator] PATCH {post_url} returned {patch_resp.status_code}: {patch_resp.text[:150]}")
                 except Exception as pe:
                     logger.warning(f"[Orchestrator] PATCH {post_url} error: {pe}")
 
@@ -129,40 +146,53 @@ class MigrationOrchestrator:
                     try:
                         post_resp = requests.post(post_url, json=tb_record, timeout=20)
                         if post_resp.status_code in (200, 201):
-                            logger.info(f"[Orchestrator] Successfully created Tableau generation record via POST at {post_url}")
-                            saved = True
-                        else:
-                            logger.error(f"[Orchestrator] POST {post_url} returned {post_resp.status_code}: {post_resp.text[:200]}")
+                            logger.info(f"[Orchestrator] Successfully created Tableau generation record in QT2F_Tableau.generation_results via {post_url}")
                     except Exception as post_err:
                         logger.error(f"[Orchestrator] POST {post_url} failed: {post_err}")
 
             elif source_type == "qlik":
-                import re
                 from app.qlik.config import config as qlik_config
                 qlik_base = (qlik_config.MONGO_API_URL or os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws").rstrip("/")
                 post_url = f"{qlik_base}/api/records/generation"
                 clean_app_id = re.sub(r"[\s_]+", "-", str(workbook_id or "").strip())
+                eff_app = clean_app_id or str(workbook_id).strip()
+                eff_space = str(project_id or "personal").strip()
                 qlik_record = {
                     "run_id": str(request.run_id).strip(),
-                    "space_id": str(project_id).strip(),
-                    "app_id": clean_app_id or str(workbook_id).strip(),
-                    "space_name": str(project_id).strip(),
-                    "project_id": str(project_id).strip(),
-                    "workbook_id": clean_app_id or str(workbook_id).strip(),
+                    "space_id": eff_space,
+                    "app_id": eff_app,
+                    "space_name": eff_space,
+                    "project_id": eff_space,
+                    "workbook_id": eff_app,
                     "status": "completed" if final_res.status == "success" else "failed",
+                    "db_location": final_res.db_location,
+                    "fetch_url": final_res.db_location,
+                    "database": "QT2F",
+                    "collection": "generation_results",
                     "payload": final_dict,
                 }
+                # Direct PyMongo write to QT2F.generation_results
+                if mongo_uri and mongo_uri.startswith("mongodb"):
+                    try:
+                        import pymongo
+                        client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+                        client["QT2F"]["generation_results"].update_one(
+                            {"run_id": str(request.run_id).strip()},
+                            {"$set": qlik_record},
+                            upsert=True
+                        )
+                    except Exception as pe:
+                        logger.debug(f"[Orchestrator] Direct PyMongo write to QT2F.generation_results failed: {pe}")
+
                 try:
                     p_res = requests.post(post_url, json=qlik_record, timeout=15)
                     if p_res.status_code in (200, 201):
-                        logger.info(f"[Orchestrator] Successfully saved Qlik generation record to {post_url}")
-                    else:
-                        logger.warning(f"[Orchestrator] Qlik generation record POST returned {p_res.status_code}: {p_res.text[:150]}")
-                except Exception as qe:
-                    logger.warning(f"[Orchestrator] Qlik generation record post failed: {qe}")
+                        logger.info(f"[Orchestrator] Successfully saved Qlik generation record to QT2F.generation_results at {post_url}")
+                except Exception as p_err:
+                    logger.warning(f"[Orchestrator] POST {post_url} failed: {p_err}")
 
         except Exception as exc:
-            logger.exception(f"[Orchestrator] Failed to persist generation record: {exc}")
+            logger.warning(f"Failed to persist generation record: {exc}")
 
         return final_res
 
@@ -335,15 +365,16 @@ class MigrationOrchestrator:
             },
         )
 
-        import os
+        import re
         from app.qlik.config import config as qlik_config
+        clean_app_id = re.sub(r"[\s_]+", "-", str(request.source.get("app_id", "")).strip())
+        eff_app = clean_app_id or str(request.source.get("app_id", "")).strip()
+        eff_space = str(request.source.get("space_id") or "personal").strip()
         qlik_base = (qlik_config.MONGO_API_URL or os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws").rstrip('/')
-        sp_id = request.source.get("space_id") or "personal"
-        ap_id = request.source.get("app_id") or ""
-        get_url = f"{qlik_base}/api/records/generation?run_id={request.run_id}&space_id={sp_id}&app_id={ap_id}"
+        get_url = f"{qlik_base}/api/records/generation?run_id={request.run_id}&app_id={eff_app}&space_id={eff_space}"
 
         db_loc = clean_result.get("db_location") or get_url
-        if not db_loc.startswith("http"):
+        if not str(db_loc).startswith("http"):
             db_loc = get_url
 
         clean_result["db_location"] = db_loc
@@ -351,8 +382,8 @@ class MigrationOrchestrator:
         clean_result["database"] = "QT2F"
         clean_result["collection"] = "generation_results"
 
-        msg = clean_result.get("message") or ""
-        msg_clean = msg.split(" | Response saved to DB location")[0].strip() if msg else "Qlik migration completed."
+        msg = clean_result.get("message") or "Qlik migration completed."
+        msg_clean = msg.split(" | Response saved to DB location")[0].strip()
         final_msg = f"{msg_clean} | Response saved to DB location: {db_loc}"
         clean_result["message"] = final_msg
 
@@ -415,20 +446,19 @@ class MigrationOrchestrator:
             },
         )
 
-        import os
+        proj_id = str(request.source.get("project_id", "")).strip()
+        wb_id = str(request.source.get("workbook_id", "")).strip()
         base_mongo = (os.getenv("MONGODB_URL") or "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws").rstrip('/')
-        proj_id = request.source.get("project_id", "")
-        wb_id = request.source.get("workbook_id", "")
         get_url = f"{base_mongo}/api/records/generation?run_id={request.run_id}&project_id={proj_id}&workbook_id={wb_id}"
 
         db_loc = clean_result.get("db_location") or get_url
-        if not db_loc.startswith("http"):
+        if not str(db_loc).startswith("http"):
             db_loc = get_url
 
         clean_result["db_location"] = db_loc
         clean_result["fetch_url"] = db_loc
         clean_result["database"] = "QT2F_Tableau"
-        clean_result["collection"] = "generation"
+        clean_result["collection"] = "generation_results"
 
         msg = clean_result.get("message") or "Tableau migration completed."
         msg_clean = msg.split(" | Response saved to DB location")[0].strip()

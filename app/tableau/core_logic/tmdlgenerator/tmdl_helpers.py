@@ -117,8 +117,8 @@ class TmdlHelperMixin:
         return worksheets[0]
 
     def _clean_dax(self, formula: str, is_parameter: bool = False) -> str:
-        if not formula: return ""
-        clean = re.sub(r'```[a-zA-Z]*', '', formula).replace('```', '').strip()
+        if not formula: return "BLANK()"
+        clean = re.sub(r'```[a-zA-Z]*', '', str(formula)).replace('```', '').strip()
         while clean.startswith('='): clean = clean[1:].strip()
         clean = re.sub(r'(?i)ISNULL\s*\(', 'ISBLANK(', clean)
         clean = re.sub(r'(?i)SUM\s*\(\s*INT\s*\(\s*(\[[^\]]+\])\s*\)\s*\)', r'SUM(\1)', clean)
@@ -129,11 +129,14 @@ class TmdlHelperMixin:
         if hasattr(self, '_parameter_names') and self._parameter_names and not is_parameter:
             for pname in self._parameter_names:
                 clean = re.sub(rf'\[\s*{re.escape(pname)}\s*\]', f"SELECTEDVALUE('{pname}'[Value])", clean, flags=re.IGNORECASE)
-        # Ensure DAX is not only comments or an error string (which produces empty/invalid TMDL)
-        non_comment_lines = [l.strip() for l in clean.splitlines() if l.strip() and not l.strip().startswith('--') and not l.strip().startswith('//')]
-        if not non_comment_lines or clean.strip().startswith('-- ERROR:'):
+
+        # Validate that clean is an actual executable DAX expression and not just error text or comment lines
+        lines = [l.strip() for l in clean.splitlines() if l.strip()]
+        non_comments = [l for l in lines if not l.startswith('--') and not l.startswith('//')]
+        if not non_comments or any("LLM call failed" in l or "413 Client Error" in l or "Payload Too Large" in l for l in lines):
             return "BLANK()"
-        return clean
+
+        return clean or "BLANK()"
 
     def _generate_local_date_table_tmdl(self, parent_table: str, col_name: str,
                                         local_table_id: str, rel_id: str,
@@ -290,14 +293,16 @@ class TmdlHelperMixin:
 
         rename_mappings = []
         for col in columns:
-            raw_c_name = col.get('name') or col.get('bi_column_name') or col.get('tableau_column_name')
-            if not raw_c_name or not str(raw_c_name).strip() or str(raw_c_name).strip().lower() == 'unknown':
+            raw_c_name = col.get('name')
+            if not raw_c_name or not str(raw_c_name).strip() or str(raw_c_name).strip() in ('""', "''", "None", "null"):
+                log_info(f"Skipping empty or invalid column name '{raw_c_name}' in table '{t_name}'")
                 continue
             c_name = self._sanitize_name(raw_c_name)
-            if not c_name or not c_name.strip() or c_name == 'Unknown':
+            if not c_name or not c_name.strip() or c_name.strip() in ('""', "''", "None", "null"):
+                log_info(f"Skipping sanitized empty column name in table '{t_name}'")
                 continue
             raw_name = col.get('tableau_column_name') or col.get('original_column_name')
-            if raw_name and c_name and raw_name != c_name:
+            if raw_name and str(raw_name).strip() and c_name and raw_name != c_name:
                 rename_mappings.append((raw_name, c_name))
             if c_name in seen_columns: continue
             seen_columns.add(c_name)
@@ -511,11 +516,17 @@ class TmdlHelperMixin:
                 self._model_measures = set()
             seen_columns_lower = {str(c).lower() for c in seen_columns}
             for meas in extra_measures:
-                m_name = self._sanitize_name(meas.get('name'))
-                if not m_name:
+                raw_m_name = meas.get('name')
+                if not raw_m_name or not str(raw_m_name).strip() or str(raw_m_name).strip() in ('""', "''", "None", "null"):
+                    continue
+                m_name = self._sanitize_name(raw_m_name)
+                if not m_name or not m_name.strip() or m_name.strip() in ('""', "''", "None", "null"):
                     continue
                 if m_name.lower() in seen_columns_lower:
                     log_info(f"Measure '{m_name}' collides with column in table '{t_name}'. Disambiguating to '{m_name} Measure'")
+                    m_name = f"{m_name} Measure"
+                if (hasattr(self, '_parameter_names') and any(m_name.lower() == p.lower() for p in self._parameter_names)) or (m_name.lower() == t_name.lower()):
+                    log_info(f"Measure '{m_name}' collides with parameter/table name. Disambiguating to '{m_name} Measure'")
                     m_name = f"{m_name} Measure"
                 m_name_lower = m_name.lower()
                 if m_name_lower in self._model_measures:
@@ -524,9 +535,6 @@ class TmdlHelperMixin:
                 self._model_measures.add(m_name_lower)
                 raw_dax = meas.get('dax_formula') or meas.get('powerbi_formula')
                 dax = self._clean_dax(raw_dax) or "BLANK()"
-                non_comment_lines = [l.strip() for l in dax.splitlines() if l.strip() and not l.strip().startswith('--') and not l.strip().startswith('//')]
-                if not non_comment_lines or dax.strip().startswith('-- ERROR:'):
-                    dax = "BLANK()"
                 
                 # Check and break any self-referencing circular dependency: measure 'M' referencing [M]
                 self_ref_candidates = {m_name}
@@ -584,13 +592,23 @@ class TmdlHelperMixin:
             ])
         else:
             lines.extend([f"    partition '{self._escape_tmdl_identifier(t_name)}' = m", "        mode: import", "        source ="])
+            # Collect valid non-empty model columns to guarantee empty spreadsheet columns are dropped
+            valid_model_cols = []
+            for col in columns:
+                raw_c_name = col.get('name')
+                if raw_c_name and str(raw_c_name).strip() and str(raw_c_name).strip() not in ('""', "''", "None", "null"):
+                    c_clean = self._sanitize_name(raw_c_name)
+                    if c_clean and c_clean not in valid_model_cols:
+                        valid_model_cols.append(c_clean)
+
             m_query_metadata = table_def.get('m_query')
-            
-            if isinstance(m_query_metadata, list) and len(m_query_metadata) > 0:
+            if isinstance(m_query_metadata, str) and m_query_metadata.strip():
+                m_script = m_query_metadata.strip()
+            elif isinstance(m_query_metadata, list) and len(m_query_metadata) > 0:
                 # Use pre-defined M query steps. Ensure commas are present between steps.
                 m_lines = []
                 for i, step in enumerate(m_query_metadata):
-                    content = step.get('content', '').strip()
+                    content = step.get('content', '').strip() if isinstance(step, dict) else str(step).strip()
                     if not content: continue
                     # Add a comma if it's not the last step and doesn't have one, and doesn't contain the 'in' block
                     if i < len(m_query_metadata) - 1:
@@ -598,26 +616,40 @@ class TmdlHelperMixin:
                             content += ","
                     m_lines.append(content)
                 m_script = "\n".join(m_lines)
-                
-                # Filter out renames already performed inside m_script
-                remaining_renames = []
-                if deduped_rename_mappings:
-                    for r, b in deduped_rename_mappings:
-                        if f'"{r}"' in m_script and f'"{b}"' in m_script:
-                            continue
-                        remaining_renames.append((r, b))
+            else:
+                m_script = None
 
-                match = re.search(r'\s+in\s+([a-zA-Z0-9_#" ]+?)\s*$', m_script)
+            if m_script:
+                # Check if renaming is already performed in m_script to avoid redundant #"Final Renamed Columns"
+                has_rename_in_m = "Table.RenameColumns" in m_script
+                match = re.search(r'\s+in\s+([^\n\r]+)\s*$', m_script)
                 if match:
                     final_step = match.group(1).strip()
-                    m_script = m_script[:match.start()]
-                    if not m_script.strip().endswith(','):
-                        m_script += ","
-                    if remaining_renames:
-                        mapping_str = "{" + ", ".join([f'{{"{r}", "{b}"}}' for r, b in remaining_renames]) + "}"
-                        m_script += f"\n                #\"Final Renamed Columns\" = Table.RenameColumns({final_step}, {mapping_str}, MissingField.Ignore),"
-                        final_step = "#\"Final Renamed Columns\""
-                    m_script += f"\n                #\"Removed Blank Columns\" = Table.SelectColumns({final_step}, List.Select(Table.ColumnNames({final_step}), each _ <> null and Text.Trim(Text.From(_)) <> \"\"))\n            in\n                #\"Removed Blank Columns\""
+                    m_body = m_script[:match.start()].rstrip()
+                    if not m_body.endswith(','):
+                        m_body += ","
+
+                    steps_to_append = []
+                    curr_step = final_step
+
+                    # 1. Only append rename if deduped_rename_mappings exist and are not already in M query
+                    if deduped_rename_mappings and not has_rename_in_m:
+                        mapping_str = "{" + ", ".join([f'{{"{r}", "{b}"}}' for r, b in deduped_rename_mappings]) + "}"
+                        steps_to_append.append(f'#"Final Renamed Columns" = Table.RenameColumns({curr_step}, {mapping_str}, MissingField.Ignore)')
+                        curr_step = '#"Final Renamed Columns"'
+
+                    # 2. Append Table.SelectColumns to guarantee trailing blank/empty columns from Google Sheets / Excel are stripped
+                    if valid_model_cols:
+                        cols_select_str = "{" + ", ".join([f'"{c}"' for c in valid_model_cols]) + "}"
+                        steps_to_append.append(f'#"Removed Blank Columns" = Table.SelectColumns({curr_step}, {cols_select_str}, MissingField.Ignore)')
+                        curr_step = '#"Removed Blank Columns"'
+
+                    if steps_to_append:
+                        steps_block = ",\n                ".join(steps_to_append)
+                        m_script = f"""{m_body}
+                {steps_block}
+            in
+                {curr_step}"""
             else:
                 target_conn_temp = self._find_target_connection(connection_info, table_def, t_name)
                 conn_type = (target_conn_temp.get('type') or connection_info.get('type', '')).lower()
@@ -646,7 +678,7 @@ class TmdlHelperMixin:
                         seen_raw_names = set()
                         for col in columns:
                             raw_name = col.get('tableau_column_name') or col.get('original_column_name')
-                            if not raw_name: continue
+                            if not raw_name or not str(raw_name).strip(): continue
                             raw_key = str(raw_name).lower()
                             if raw_key in seen_raw_names:
                                 continue
@@ -663,9 +695,12 @@ class TmdlHelperMixin:
                         m_lines.append(f"    #\"Renamed Columns\" = Table.RenameColumns({current_step}, {mapping_str}, MissingField.Ignore),")
                         current_step = "#\"Renamed Columns\""
 
-                    # 3. Remove Blank Columns Step
-                    m_lines.append(f"    #\"Removed Blank Columns\" = Table.SelectColumns({current_step}, List.Select(Table.ColumnNames({current_step}), each _ <> null and Text.Trim(Text.From(_)) <> \"\")),")
-                    current_step = "#\"Removed Blank Columns\""
+                    # 3. Select Columns Step (Strip empty or unmapped columns from raw source)
+                    if valid_model_cols:
+                        cols_select_str = "{" + ", ".join([f'"{c}"' for c in valid_model_cols]) + "}"
+                        m_lines.append(f"    #\"Removed Blank Columns\" = Table.SelectColumns({current_step}, {cols_select_str}, MissingField.Ignore),")
+                        current_step = "#\"Removed Blank Columns\""
+
                     return current_step
 
                 is_ai_fallback = False

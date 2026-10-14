@@ -127,36 +127,47 @@ async def get_migration_status(
                     except Exception as e:
                         logger.warning(f"Error querying Qlik generation records with {p}: {e}")
 
-        # 2. Try Tableau MongoDB (mongo_db['generation'] and mongo_db['generation_results'])
+        # 2. Try direct MongoDB query across QT2F_Tableau and QT2F for generation_results
+        mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+        if mongo_uri and mongo_uri.startswith("mongodb"):
+            try:
+                import pymongo
+                client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+                for db_name in ["QT2F_Tableau", "QT2F"]:
+                    rec = client[db_name]["generation_results"].find_one(
+                        {"run_id": eff_run_id} if eff_run_id else {"status": "completed"},
+                        sort=[('_id', -1)]
+                    )
+                    if rec:
+                        if "_id" in rec:
+                            rec["_id"] = str(rec["_id"])
+                        return JSONResponse(status_code=200, content=rec)
+            except Exception as pe:
+                logger.debug(f"Direct PyMongo lookup for generation_results failed: {pe}")
+
+        # 3. Try Tableau MongoDB proxy (mongo_db['generation_results'])
         if mongo_db is not None:
-            raw_wb = workbook_id.strip() if workbook_id else (app_id.strip() if app_id else None)
-            wb_candidates = list(dict.fromkeys([x for x in [raw_wb, eff_app_id, clean_wb_id] if x]))
-            tb_queries_to_try = []
+            tb_query = {}
+            if eff_run_id:
+                tb_query["run_id"] = eff_run_id
+            if eff_space_id:
+                tb_query["project_id"] = eff_space_id
+            if eff_app_id:
+                tb_query["workbook_id"] = eff_app_id
 
-            for wb_cand in (wb_candidates or [None]):
-                q = {}
-                if eff_run_id:
-                    q["run_id"] = eff_run_id
-                if eff_space_id:
-                    q["project_id"] = eff_space_id
-                if wb_cand:
-                    q["workbook_id"] = wb_cand
-                tb_queries_to_try.append(q)
-
-            for t_q in tb_queries_to_try:
-                completed_query = dict(t_q)
-                completed_query["status"] = "completed"
+            completed_query = dict(tb_query)
+            completed_query["status"] = "completed"
+            record = await mongo_db["generation_results"].find_one(completed_query, sort=[('_id', -1)])
+            if not record:
+                record = await mongo_db["generation_results"].find_one(tb_query, sort=[('_id', -1)])
+            if not record:
                 record = await mongo_db["generation"].find_one(completed_query, sort=[('_id', -1)])
-                if not record:
-                    record = await mongo_db["generation_results"].find_one(completed_query, sort=[('_id', -1)])
-                if not record:
-                    record = await mongo_db["generation"].find_one(t_q, sort=[('_id', -1)])
-                if not record:
-                    record = await mongo_db["generation_results"].find_one(t_q, sort=[('_id', -1)])
-                if record:
-                    if "_id" in record:
-                        record["_id"] = str(record["_id"])
-                    return JSONResponse(status_code=200, content=record)
+            if not record:
+                record = await mongo_db["generation"].find_one(tb_query, sort=[('_id', -1)])
+            if record:
+                if "_id" in record:
+                    record["_id"] = str(record["_id"])
+                return JSONResponse(status_code=200, content=record)
 
         if fallback_remote_data is not None:
             return JSONResponse(status_code=200, content=fallback_remote_data)
@@ -204,8 +215,10 @@ async def get_agent_activities(
             import pymongo
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
             for db_name in ["QT2F", "QT2F_Tableau"]:
-                coll = client[db_name]["activities"]
+                coll = client[db_name]["agent_actions"]
                 docs = list(coll.find({"run_id": run_id.strip()}).sort("_id", -1))
+                if not docs:
+                    docs = list(client[db_name]["activities"].find({"run_id": run_id.strip()}).sort("_id", -1))
                 if docs:
                     for d in docs:
                         if "_id" in d:
