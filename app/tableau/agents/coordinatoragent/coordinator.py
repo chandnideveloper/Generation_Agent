@@ -1,3 +1,4 @@
+import os
 from autogen import AssistantAgent
 import aiohttp
 import httpx

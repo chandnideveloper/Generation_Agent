@@ -7,6 +7,7 @@ Coordinates Qlik and Tableau generation directly in Python:
 - Zero credential leakage.
 """
 
+import os
 import logging
 from typing import Any, Dict, Optional
 
