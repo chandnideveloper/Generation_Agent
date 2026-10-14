@@ -81,7 +81,7 @@ def save_log_to_mongodb(payload: Dict[str, Any]) -> None:
 
     # 2. HTTP API fallback (FastAPI JSON store on AWS Lambda / microservice)
     candidate_bases = []
-    for raw in [os.getenv("MONGODB_URL"), config.MONGO_API_URL, os.getenv("TELEMETRY_LOCAL_API")]:
+    for raw in [config.MONGO_API_URL, os.getenv("MONGO_API_URL"), os.getenv("TELEMETRY_LOCAL_API")]:
         if raw and str(raw).startswith("http"):
             cleaned = str(raw).rstrip("/")
             if cleaned not in candidate_bases:

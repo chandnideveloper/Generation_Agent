@@ -16,7 +16,16 @@ def get_mongo_api_url() -> str:
     url = os.getenv("MONGO_API_URL", "http://127.0.0.1:8008")
     return url.rstrip("/")
 
-async def log_activity_async(run_id: str, project_id: str, workbook_id: str, summary: str, status: str = "running") -> None:
+from typing import Optional
+
+async def log_activity_async(
+    run_id: str,
+    project_id: str,
+    workbook_id: str,
+    summary: str,
+    status: str = "running",
+    source_type: Optional[str] = None,
+) -> None:
     """
     Log an agent action to the central MongoDB Activity API asynchronously and directly to MongoDB.
     """
@@ -41,13 +50,16 @@ async def log_activity_async(run_id: str, project_id: str, workbook_id: str, sum
         "type": "agent_activity",
     }
     
-    # 1. Direct MongoDB insertion if MONGODB_URL is available
+    st = (source_type or "").lower()
+    target_dbs = ["QT2F"] if st == "qlik" else (["QT2F_Tableau"] if st == "tableau" else ["QT2F", "QT2F_Tableau"])
+
+    # 1. Direct MongoDB insertion if mongo URI is available
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     if mongo_uri and mongo_uri.startswith("mongodb"):
         try:
             import pymongo
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-            for db_name in ["QT2F", "QT2F_Tableau"]:
+            for db_name in target_dbs:
                 try:
                     client[db_name]["activities"].insert_one(dict(payload))
                     client[db_name]["agent_logs"].insert_one(dict(payload))
@@ -56,11 +68,18 @@ async def log_activity_async(run_id: str, project_id: str, workbook_id: str, sum
         except Exception as err:
             logger.debug(f"[ActivityLogger] Direct MongoDB insert failed: {err}")
 
-    # 2. HTTP POST fallback to /api/records/activities
+    # 2. HTTP POST fallback to /api/records/activities strictly on matching platform service
+    if st == "qlik":
+        raw_bases = [get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]
+    elif st == "tableau":
+        raw_bases = [os.getenv("MONGODB_URL"), os.getenv("TELEMETRY_LOCAL_API")]
+    else:
+        raw_bases = [get_mongo_api_url(), os.getenv("MONGODB_URL"), os.getenv("TELEMETRY_LOCAL_API")]
+
     candidate_bases = []
-    for raw in [os.getenv("MONGODB_URL"), get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
-        if raw and raw.startswith("http"):
-            b = raw.rstrip("/")
+    for raw in raw_bases:
+        if raw and str(raw).startswith("http"):
+            b = str(raw).rstrip("/")
             if b not in candidate_bases:
                 candidate_bases.append(b)
 
@@ -75,7 +94,14 @@ async def log_activity_async(run_id: str, project_id: str, workbook_id: str, sum
             except Exception as e:
                 logger.debug(f"[ActivityLogger] Failed to log async activity to {url}: {e}")
 
-def log_activity_sync(run_id: str, project_id: str, workbook_id: str, summary: str, status: str = "running") -> None:
+def log_activity_sync(
+    run_id: str,
+    project_id: str,
+    workbook_id: str,
+    summary: str,
+    status: str = "running",
+    source_type: Optional[str] = None,
+) -> None:
     """
     Log an agent action to the central MongoDB Activity API synchronously (fire-and-forget).
     """
@@ -100,13 +126,16 @@ def log_activity_sync(run_id: str, project_id: str, workbook_id: str, summary: s
         "type": "agent_activity",
     }
     
+    st = (source_type or "").lower()
+    target_dbs = ["QT2F"] if st == "qlik" else (["QT2F_Tableau"] if st == "tableau" else ["QT2F", "QT2F_Tableau"])
+
     def _do_post():
         mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
         if mongo_uri and mongo_uri.startswith("mongodb"):
             try:
                 import pymongo
                 client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-                for db_name in ["QT2F", "QT2F_Tableau"]:
+                for db_name in target_dbs:
                     try:
                         client[db_name]["activities"].insert_one(dict(payload))
                         client[db_name]["agent_logs"].insert_one(dict(payload))
@@ -115,10 +144,17 @@ def log_activity_sync(run_id: str, project_id: str, workbook_id: str, summary: s
             except Exception as err:
                 logger.debug(f"[ActivityLogger] Direct MongoDB insert failed: {err}")
 
+        if st == "qlik":
+            raw_bases = [get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]
+        elif st == "tableau":
+            raw_bases = [os.getenv("MONGODB_URL"), os.getenv("TELEMETRY_LOCAL_API")]
+        else:
+            raw_bases = [get_mongo_api_url(), os.getenv("MONGODB_URL"), os.getenv("TELEMETRY_LOCAL_API")]
+
         candidate_bases = []
-        for raw in [os.getenv("MONGODB_URL"), get_mongo_api_url(), os.getenv("TELEMETRY_LOCAL_API")]:
-            if raw and raw.startswith("http"):
-                b = raw.rstrip("/")
+        for raw in raw_bases:
+            if raw and str(raw).startswith("http"):
+                b = str(raw).rstrip("/")
                 if b not in candidate_bases:
                     candidate_bases.append(b)
 

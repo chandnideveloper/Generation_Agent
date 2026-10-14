@@ -56,7 +56,7 @@ def _post_with_fallback(path: str, payload: Dict[str, Any], timeout: tuple = (2,
     bases = [
         os.getenv("TELEMETRY_LOCAL_API"),
         config.MONGO_API_URL,
-        os.getenv("MONGODB_URL"),
+        os.getenv("MONGO_API_URL"),
     ]
     for base in bases:
         if not base:
@@ -80,7 +80,7 @@ def _log_action_sync(action: str, request: GenerateRequest, app_name: str, detai
     run_id = request.run_id or "unknown"
     workspace_id = request.workspace_id or request.space_id or "personal"
     app_id = request.app_id or "unknown"
-    log_activity_sync(run_id, workspace_id, app_id, action, status="success")
+    log_activity_sync(run_id, workspace_id, app_id, action, status="success", source_type="qlik")
     log_qlik_info(f"ACTION: {action} | {details}", details={"action": action, "app_name": app_name, "info": details})
 
 
@@ -366,9 +366,9 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
         },
     }
 
-    # Attempt immediate synchronous save to all configured endpoints
+    # Attempt immediate synchronous save to Qlik MongoDB endpoints
     saved = False
-    for base in [config.MONGO_API_URL, os.getenv("MONGODB_URL")]:
+    for base in [config.MONGO_API_URL, os.getenv("MONGO_API_URL")]:
         if not base:
             continue
         url = f"{base.rstrip('/')}/api/records/generation"
@@ -385,6 +385,11 @@ def _save_to_mongodb(result: Dict[str, Any], request: GenerateRequest, app_name:
     if not saved:
         _TELEMETRY_POOL.submit(_post_with_fallback, "api/records/generation", doc, (2, 10))
 
+    base_url = config.MONGO_API_URL or os.getenv("MONGO_API_URL")
+    if base_url:
+        db_location = f"{base_url.rstrip('/')}/api/records/generation?run_id={request.run_id}&space_id={eff_space}&app_id={eff_app}"
+    else:
+        db_location = "QT2F.generation_results"
     return db_location
 
 

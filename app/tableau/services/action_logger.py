@@ -1,3 +1,5 @@
+import os
+import logging
 import asyncio
 import uuid
 import datetime
@@ -7,6 +9,8 @@ from app.tableau.core.config import Config, mongo_db
 from app.tableau.core.logging_utils import log_error, log_info, log_warning, run_background_task, store_deadletter
 from app.tableau.core.http_client import get_resilient_client
 from app.tableau.api.schemas import CosmosActivityRecord
+
+logger = logging.getLogger(__name__)
 
 class ActionLogger:
     def __init__(self):
@@ -89,7 +93,7 @@ class ActionLogger:
                 try:
                     import pymongo
                     client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-                    for db_name in ["QT2F_Tableau", "QT2F_Tablaue", "QT2F"]:
+                    for db_name in ["QT2F_Tableau", "QT2F_Tablaue"]:
                         try:
                             client[db_name]["agent_logs"].insert_one(dict(validated_payload))
                             client[db_name]["activities"].insert_one(dict(validated_payload))

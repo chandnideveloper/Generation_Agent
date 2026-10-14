@@ -129,6 +129,10 @@ class TmdlHelperMixin:
         if hasattr(self, '_parameter_names') and self._parameter_names and not is_parameter:
             for pname in self._parameter_names:
                 clean = re.sub(rf'\[\s*{re.escape(pname)}\s*\]', f"SELECTEDVALUE('{pname}'[Value])", clean, flags=re.IGNORECASE)
+        # Ensure DAX is not only comments or an error string (which produces empty/invalid TMDL)
+        non_comment_lines = [l.strip() for l in clean.splitlines() if l.strip() and not l.strip().startswith('--') and not l.strip().startswith('//')]
+        if not non_comment_lines or clean.strip().startswith('-- ERROR:'):
+            return "BLANK()"
         return clean
 
     def _generate_local_date_table_tmdl(self, parent_table: str, col_name: str,
@@ -286,7 +290,12 @@ class TmdlHelperMixin:
 
         rename_mappings = []
         for col in columns:
-            c_name = self._sanitize_name(col.get('name', 'Unknown'))
+            raw_c_name = col.get('name') or col.get('bi_column_name') or col.get('tableau_column_name')
+            if not raw_c_name or not str(raw_c_name).strip() or str(raw_c_name).strip().lower() == 'unknown':
+                continue
+            c_name = self._sanitize_name(raw_c_name)
+            if not c_name or not c_name.strip() or c_name == 'Unknown':
+                continue
             raw_name = col.get('tableau_column_name') or col.get('original_column_name')
             if raw_name and c_name and raw_name != c_name:
                 rename_mappings.append((raw_name, c_name))
@@ -515,6 +524,9 @@ class TmdlHelperMixin:
                 self._model_measures.add(m_name_lower)
                 raw_dax = meas.get('dax_formula') or meas.get('powerbi_formula')
                 dax = self._clean_dax(raw_dax) or "BLANK()"
+                non_comment_lines = [l.strip() for l in dax.splitlines() if l.strip() and not l.strip().startswith('--') and not l.strip().startswith('//')]
+                if not non_comment_lines or dax.strip().startswith('-- ERROR:'):
+                    dax = "BLANK()"
                 
                 # Check and break any self-referencing circular dependency: measure 'M' referencing [M]
                 self_ref_candidates = {m_name}
@@ -587,15 +599,25 @@ class TmdlHelperMixin:
                     m_lines.append(content)
                 m_script = "\n".join(m_lines)
                 
+                # Filter out renames already performed inside m_script
+                remaining_renames = []
                 if deduped_rename_mappings:
-                    mapping_str = "{" + ", ".join([f'{{"{r}", "{b}"}}' for r, b in deduped_rename_mappings]) + "}"
-                    match = re.search(r'\s+in\s+([a-zA-Z0-9_#" ]+?)\s*$', m_script)
-                    if match:
-                        final_step = match.group(1).strip()
-                        m_script = m_script[:match.start()]
-                        if not m_script.strip().endswith(','):
-                            m_script += ","
-                        m_script += f"\n                #\"Final Renamed Columns\" = Table.RenameColumns({final_step}, {mapping_str}, MissingField.Ignore)\n            in\n                #\"Final Renamed Columns\""
+                    for r, b in deduped_rename_mappings:
+                        if f'"{r}"' in m_script and f'"{b}"' in m_script:
+                            continue
+                        remaining_renames.append((r, b))
+
+                match = re.search(r'\s+in\s+([a-zA-Z0-9_#" ]+?)\s*$', m_script)
+                if match:
+                    final_step = match.group(1).strip()
+                    m_script = m_script[:match.start()]
+                    if not m_script.strip().endswith(','):
+                        m_script += ","
+                    if remaining_renames:
+                        mapping_str = "{" + ", ".join([f'{{"{r}", "{b}"}}' for r, b in remaining_renames]) + "}"
+                        m_script += f"\n                #\"Final Renamed Columns\" = Table.RenameColumns({final_step}, {mapping_str}, MissingField.Ignore),"
+                        final_step = "#\"Final Renamed Columns\""
+                    m_script += f"\n                #\"Removed Blank Columns\" = Table.SelectColumns({final_step}, List.Select(Table.ColumnNames({final_step}), each _ <> null and Text.Trim(Text.From(_)) <> \"\"))\n            in\n                #\"Removed Blank Columns\""
             else:
                 target_conn_temp = self._find_target_connection(connection_info, table_def, t_name)
                 conn_type = (target_conn_temp.get('type') or connection_info.get('type', '')).lower()
@@ -640,6 +662,10 @@ class TmdlHelperMixin:
                     if mappings:
                         m_lines.append(f"    #\"Renamed Columns\" = Table.RenameColumns({current_step}, {mapping_str}, MissingField.Ignore),")
                         current_step = "#\"Renamed Columns\""
+
+                    # 3. Remove Blank Columns Step
+                    m_lines.append(f"    #\"Removed Blank Columns\" = Table.SelectColumns({current_step}, List.Select(Table.ColumnNames({current_step}), each _ <> null and Text.Trim(Text.From(_)) <> \"\")),")
+                    current_step = "#\"Removed Blank Columns\""
                     return current_step
 
                 is_ai_fallback = False

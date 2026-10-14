@@ -109,7 +109,8 @@ class TmdlGenerator(TmdlHelperMixin):
             if match:
                 ref_table = match.group(1)
                 ref_column = match.group(2)
-                source_column_str = f"{ref_table}[{ref_column}]"
+                safe_ref_table = f"'{ref_table}'" if " " in ref_table else ref_table
+                source_column_str = f"{safe_ref_table}[{ref_column}]"
 
             default = pbi_data.get("current_value") or param.get("suggested_default", "0")
             data_type = pbi_data.get("data_type") or param.get("data_type", "integer")
@@ -177,8 +178,7 @@ class TmdlGenerator(TmdlHelperMixin):
             if hasattr(self, '_model_measures') and self._model_measures is not None:
                 self._model_measures.add(harvest_name.lower())
 
-            harvest_measure_block = f"""    measure '{self._escape_tmdl_identifier(harvest_name)}'
-        expression: SELECTEDVALUE('{self._escape_tmdl_identifier(name)}'[{ref_column}], {default_val})
+            harvest_measure_block = f"""    measure '{self._escape_tmdl_identifier(harvest_name)}' = SELECTEDVALUE('{self._escape_tmdl_identifier(name)}'[{ref_column}], {default_val})
         formatString: {format_str}
         isHidden: true"""
             measure_blocks.append(harvest_measure_block)
@@ -197,6 +197,9 @@ class TmdlGenerator(TmdlHelperMixin):
                             self._model_measures.add(m_lower)
                         raw_meas_dax = tc.get("dax_formula") or tc.get("powerbi_formula") or "1"
                         cleaned_meas_dax = self._clean_dax(raw_meas_dax)
+                        non_comment = [l.strip() for l in cleaned_meas_dax.split('\n') if l.strip() and not (l.strip().startswith('--') or l.strip().startswith('//'))]
+                        if not non_comment or cleaned_meas_dax.strip().upper().startswith("-- ERROR:"):
+                            cleaned_meas_dax = "BLANK()"
                         measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                         log_info(f"[add_parameters] Using '{measure_name}' as measure for parameter '{name}'")
@@ -214,6 +217,9 @@ class TmdlGenerator(TmdlHelperMixin):
                         self._model_measures.add(m_lower)
                     raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "1"
                     cleaned_meas_dax = self._clean_dax(raw_meas_dax)
+                    non_comment = [l.strip() for l in cleaned_meas_dax.split('\n') if l.strip() and not (l.strip().startswith('--') or l.strip().startswith('//'))]
+                    if not non_comment or cleaned_meas_dax.strip().upper().startswith("-- ERROR:"):
+                        cleaned_meas_dax = "BLANK()"
                     measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                     log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")
@@ -221,10 +227,6 @@ class TmdlGenerator(TmdlHelperMixin):
                     log_info(f"[add_parameters] Skipping duplicate measure '{measure_name}' on parameter '{name}' (already in model)")
 
             measure_block = "\n\n".join(measure_blocks)
-
-            # [FIX] Quote ref_table if it has spaces
-            safe_ref_table = f"'{ref_table}'" if " " in ref_table else ref_table
-            source_column_str = f"{safe_ref_table}[{ref_column}]"
 
             # [FIX] Escape table and column names in the main TMDL template
             tmdl = f"""table '{self._escape_tmdl_identifier(name)}'

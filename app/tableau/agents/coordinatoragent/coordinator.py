@@ -186,24 +186,12 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
             if workbook_id:
                 query["workbook_id"] = workbook_id
 
-            # If completed, clean up any previous failed record so stale failures never linger
-            if status == "completed":
-                try:
-                    del_query = {"run_id": run_id}
-                    if project_id:
-                        del_query["project_id"] = project_id
-                    if workbook_id:
-                        del_query["workbook_id"] = workbook_id
-                    await mongo_db["generation"].delete_many(del_query)
-                except Exception as de:
-                    log_warning(f"[CoordinatorAgent] Could not clean up failed generation records: {de}")
-
-            # Try saving record; if payload is large (> 500KB) strip raw trees to guarantee HTTP/Lambda delivery
+            # Ensure payload is trimmed of massive raw file trees for safe MongoDB/Cosmos persistence
             import json as _json
             try:
                 dumped_size = len(_json.dumps(record.get("payload", {})))
-                if dumped_size > 500_000:
-                    log_info(f"[CoordinatorAgent] Payload size {dumped_size} bytes exceeds 500KB; pruning raw file trees for safe persistence")
+                if dumped_size > 200_000:
+                    log_info(f"[CoordinatorAgent] Payload size {dumped_size} bytes exceeds 200KB; pruning raw file trees for safe persistence")
                     p = record.get("payload", {})
                     record["payload"] = {
                         "final_response": p.get("final_response", {}),
@@ -1486,9 +1474,14 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
                 "github_url": None
             })
 
+        base_mongo_url = getattr(Config, "MONGODB_URL", "") or os.getenv("MONGODB_URL", "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws")
+        fetch_location = f"{base_mongo_url.rstrip('/')}/api/records/generation?run_id={run_id}&project_id={project_id}&workbook_id={workbook_id}"
+
         final_response_data = {
             "status": "success",
-            "message": "PBIX project generated and deployed successfully.",
+            "message": f"PBIX project generated and deployed successfully. | Response saved to DB location: {fetch_location}",
+            "db_location": fetch_location,
+            "fetch_url": fetch_location,
             "project": project_metadata,
             "summary": {
                 "pages_generated": len(pages),

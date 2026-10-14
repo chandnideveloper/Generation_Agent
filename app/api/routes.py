@@ -129,28 +129,34 @@ async def get_migration_status(
 
         # 2. Try Tableau MongoDB (mongo_db['generation'] and mongo_db['generation_results'])
         if mongo_db is not None:
-            tb_query = {}
-            if eff_run_id:
-                tb_query["run_id"] = eff_run_id
-            if eff_space_id:
-                tb_query["project_id"] = eff_space_id
-            if eff_app_id:
-                tb_query["workbook_id"] = eff_app_id
+            raw_wb = workbook_id.strip() if workbook_id else (app_id.strip() if app_id else None)
+            wb_candidates = list(dict.fromkeys([x for x in [raw_wb, eff_app_id, clean_wb_id] if x]))
+            tb_queries_to_try = []
 
-            # First look for a completed record
-            completed_query = dict(tb_query)
-            completed_query["status"] = "completed"
-            record = await mongo_db["generation"].find_one(completed_query, sort=[('_id', -1)])
-            if not record:
-                record = await mongo_db["generation_results"].find_one(completed_query, sort=[('_id', -1)])
-            if not record:
-                record = await mongo_db["generation"].find_one(tb_query, sort=[('_id', -1)])
-            if not record:
-                record = await mongo_db["generation_results"].find_one(tb_query, sort=[('_id', -1)])
-            if record:
-                if "_id" in record:
-                    record["_id"] = str(record["_id"])
-                return JSONResponse(status_code=200, content=record)
+            for wb_cand in (wb_candidates or [None]):
+                q = {}
+                if eff_run_id:
+                    q["run_id"] = eff_run_id
+                if eff_space_id:
+                    q["project_id"] = eff_space_id
+                if wb_cand:
+                    q["workbook_id"] = wb_cand
+                tb_queries_to_try.append(q)
+
+            for t_q in tb_queries_to_try:
+                completed_query = dict(t_q)
+                completed_query["status"] = "completed"
+                record = await mongo_db["generation"].find_one(completed_query, sort=[('_id', -1)])
+                if not record:
+                    record = await mongo_db["generation_results"].find_one(completed_query, sort=[('_id', -1)])
+                if not record:
+                    record = await mongo_db["generation"].find_one(t_q, sort=[('_id', -1)])
+                if not record:
+                    record = await mongo_db["generation_results"].find_one(t_q, sort=[('_id', -1)])
+                if record:
+                    if "_id" in record:
+                        record["_id"] = str(record["_id"])
+                    return JSONResponse(status_code=200, content=record)
 
         if fallback_remote_data is not None:
             return JSONResponse(status_code=200, content=fallback_remote_data)

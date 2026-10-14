@@ -97,7 +97,7 @@ def _save_tableau_log_sync(payload: Dict):
         try:
             import pymongo
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-            for db_name in ["QT2F_Tableau", "QT2F_Tablaue", "QT2F"]:
+            for db_name in ["QT2F_Tableau", "QT2F_Tablaue"]:
                 try:
                     client[db_name]["agent_logs"].insert_one(dict(payload))
                     client[db_name]["logs"].insert_one(dict(payload))
@@ -143,7 +143,7 @@ async def _do_post_log(payload: Dict):
             try:
                 import pymongo
                 client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
-                for db_name in ["QT2F_Tableau", "QT2F_Tablaue", "QT2F"]:
+                for db_name in ["QT2F_Tableau", "QT2F_Tablaue"]:
                     try:
                         client[db_name]["agent_logs"].insert_one(dict(validated_payload))
                         client[db_name]["logs"].insert_one(dict(validated_payload))
@@ -291,7 +291,7 @@ async def send_log_to_api(self, project_id: str, workbook_id: str, run_id: str, 
     """
     Sends a log entry to the Centralized MongoDB API (Fire-and-forget).
     """
-    base_url = COSMOS_DB_API_URL
+    base_url = getattr(Config, "MONGODB_URL", None) or os.getenv("MONGODB_URL", "")
     if not base_url: return
 
     api_url = f"{base_url.rstrip('/')}/api/records/logs"
