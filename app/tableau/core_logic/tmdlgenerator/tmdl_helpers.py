@@ -283,7 +283,7 @@ class TmdlHelperMixin:
         local_date_tables = []
 
         def get_m_type(json_type: str) -> str:
-            jt = json_type.lower()
+            jt = str(json_type or 'string').lower()
             if jt in ['integer', 'int', 'int64', 'whole number']: return 'Int64.Type'
             if jt in ['real', 'decimal', 'float', 'double', 'number', 'decimal number']: return 'type number'
             if jt in ['boolean', 'bool', 'true/false']: return 'type logical'
@@ -306,7 +306,7 @@ class TmdlHelperMixin:
                 rename_mappings.append((raw_name, c_name))
             if c_name in seen_columns: continue
             seen_columns.add(c_name)
-            raw_type = col.get('datatype', col.get('bi_datatype', 'string'))
+            raw_type = col.get('datatype') or col.get('bi_datatype') or col.get('tableau_datatype') or 'string'
             dtype = self._map_data_type(raw_type)
             is_date_col = (dtype == 'dateTime')
             # In DirectLake mode, source table columns are physical lakehouse
@@ -400,7 +400,7 @@ class TmdlHelperMixin:
             for calc in extra_calcs:
                 if not isinstance(calc, dict): continue
                 raw_formula = (calc.get('dax_formula') or calc.get('powerbi_formula') or '').upper()
-                if calc.get('type', 'dimension').lower() == 'measure' or any(f in raw_formula for f in forbidden_funcs):
+                if str(calc.get('type') or 'dimension').lower() == 'measure' or any(f in raw_formula for f in forbidden_funcs):
                     extra_measures_from_calcs.append(calc)
                 else: actual_calcs.append(calc)
 
@@ -581,7 +581,7 @@ class TmdlHelperMixin:
                 lines.append(f"            schemaName: {direct_lake_schema}")
             lines.append(f"            expressionSource: 'DirectLake - {lh_name}'")
             lines.append("")
-        elif connection_info.get('mode', '').lower() == 'extract' and lakehouse_info and is_direct_lake: # Keep this check strict
+        elif str(connection_info.get('mode') or '').lower() == 'extract' and lakehouse_info and is_direct_lake: # Keep this check strict
             lh_name = lakehouse_info.get('name', 'Lakehouse')
             lines.extend([
                 f"    partition '{self._escape_tmdl_identifier(t_name)}' = m",
@@ -652,7 +652,7 @@ class TmdlHelperMixin:
                 {curr_step}"""
             else:
                 target_conn_temp = self._find_target_connection(connection_info, table_def, t_name)
-                conn_type = (target_conn_temp.get('type') or connection_info.get('type', '')).lower()
+                conn_type = str(target_conn_temp.get('type') or connection_info.get('type') or '').lower()
                 server = connection_info.get('server') or "<Server not found>"
                 database = connection_info.get('database') or "<Database not found>"
                 warehouse = connection_info.get('warehouse') or ""
@@ -1127,7 +1127,7 @@ class TmdlHelperMixin:
         return "\n".join(lines), local_date_tables
 
     def _map_data_type(self, json_type: str) -> str:
-        jt = json_type.lower()
+        jt = str(json_type or 'string').lower()
         if jt in ['string', 'text']: return 'string'
         if jt in ['integer', 'int', 'int64', 'whole number']: return 'int64'
         if jt in ['real', 'decimal', 'float', 'double', 'number', 'decimal number']: return 'double'
@@ -1154,10 +1154,40 @@ class TmdlHelperMixin:
 
     def _generate_database_tmdl(self) -> str: return "database Database\n    compatibilityLevel: 1604\n"
 
-    def _generate_relationships_tmdl(self, relationships: List[Dict], valid_tables: List[str]) -> str:
+    @staticmethod
+    def _extract_columns_from_tmdl(content: str):
+        """Parse a table TMDL and return (table_name, set_of_column_names)."""
+        def _unq(s: str) -> str:
+            s = s.strip()
+            if s.startswith("'") and s.endswith("'") and len(s) >= 2:
+                s = s[1:-1].replace("''", "'")
+            return s
+        table_name, cols = None, set()
+        for line in (content or "").splitlines():
+            m = re.match(r"^table\s+('(?:[^']|'')*'|[^\s=]+)", line)
+            if m and table_name is None:
+                table_name = _unq(m.group(1))
+                continue
+            m = re.match(r"^\t?\s{0,8}column\s+('(?:[^']|'')*'|[^\s=]+)", line)
+            if m:
+                cols.add(_unq(m.group(1)))
+        return table_name, cols
+
+    def _generate_relationships_tmdl(self, relationships: List[Dict], valid_tables: List[str], table_columns: Dict[str, set] = None) -> str:
         lines = []
         seen = set()
         active_pairs = set()
+        # Case-insensitive lookup: table -> {lower_col: actual_col}
+        col_lookup = {t: {c.lower(): c for c in cols} for t, cols in (table_columns or {}).items()}
+
+        def _resolve_col(table: str, col: str):
+            if not table_columns:
+                return col
+            cols = col_lookup.get(table)
+            if cols is None:
+                return col
+            return cols.get((col or "").lower())
+
         for rel in relationships:
             try:
                 pbi = rel.get('power_bi') or rel.get('powerbi')
@@ -1166,7 +1196,12 @@ class TmdlHelperMixin:
                 t_from, c_from = self._sanitize_name(rel.get('fromTable')), self._sanitize_name(rel.get('fromColumn'))
                 t_to, c_to = self._sanitize_name(rel.get('toTable')), self._sanitize_name(rel.get('toColumn'))
                 if t_from not in valid_tables or t_to not in valid_tables: continue
-                card = rel.get('cardinality', 'ManyToOne').lower().replace('-', '')
+                r_from, r_to = _resolve_col(t_from, c_from), _resolve_col(t_to, c_to)
+                if not r_from or not r_to:
+                    log_error(f"Skipping relationship {t_from}[{c_from}] -> {t_to}[{c_to}]: column not found in table definition")
+                    continue
+                c_from, c_to = r_from, r_to
+                card = str(rel.get('cardinality') or 'ManyToOne').lower().replace('-', '')
                 if card == 'onetomany': t_from, t_to, c_from, c_to = t_to, t_from, c_to, c_from
                 key = (t_from, c_from, t_to, c_to)
                 if key in seen: continue
@@ -1181,7 +1216,7 @@ class TmdlHelperMixin:
                 elif card == 'onetoone': lines.extend(["    fromCardinality: one", "    toCardinality: one"])
                 if not active: lines.append("    isActive: false")
                 if rel.get('joinOnDateBehavior'): lines.append(f"    joinOnDateBehavior: {rel['joinOnDateBehavior']}")
-                if rel.get('crossFilterDirection', 'Single').lower() == 'both': lines.append("    crossFilteringBehavior: bothDirections")
+                if str(rel.get('crossFilterDirection') or 'Single').lower() == 'both': lines.append("    crossFilteringBehavior: bothDirections")
                 lines.append("")
             except Exception as e: log_error(f"Failed to parse relationship: {e}")
         return "\n".join(lines)
@@ -1198,7 +1233,7 @@ class TmdlHelperMixin:
     def _normalize_table_name(self, name: str) -> str:
         if not name:
             return ""
-        name = name.replace("[", "").replace("]", "").replace('"', "").replace("`", "").strip().lower()
+        name = str(name).replace("[", "").replace("]", "").replace('"', "").replace("`", "").strip().lower()
         parts = name.split(".")
         if len(parts) > 1:
             last = parts[-1].strip()

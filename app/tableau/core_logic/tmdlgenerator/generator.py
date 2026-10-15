@@ -351,8 +351,8 @@ class TmdlGenerator(TmdlHelperMixin):
             log_info(f"Found {len(calc_fields_from_lods)} calculated fields from 'Calculated Fields & LODs'")
 
             # Split sets: dynamic → calc group tables (Calculation Items); static → calculated columns
-            calc_item_sets = [s for s in all_sets if s.get('type', '').lower() == 'dynamic']
-            regular_sets = [s for s in all_sets if s.get('type', '').lower() == 'static']
+            calc_item_sets = [s for s in all_sets if str(s.get('type') or '').lower() == 'dynamic']
+            regular_sets = [s for s in all_sets if str(s.get('type') or '').lower() == 'static']
 
             col_to_table_map = {}
             valid_table_names = []
@@ -769,7 +769,12 @@ class TmdlGenerator(TmdlHelperMixin):
             # Build the Model file after all tables and relationships are collected
             rels_tmdl = ""
             if relationships:
-                rels_tmdl = self._generate_relationships_tmdl(relationships, valid_table_names)
+                table_columns = {}
+                for _path, (_content, _st) in tables_to_push_dict.items():
+                    _tname, _cols = self._extract_columns_from_tmdl(_content)
+                    if _tname:
+                        table_columns[_tname] = _cols
+                rels_tmdl = self._generate_relationships_tmdl(relationships, valid_table_names, table_columns)
 
             model_content = self._generate_model_tmdl(valid_table_names, rels_tmdl, has_calc_groups=False, is_direct_lake=is_direct_lake, lakehouse_info=lakehouse_info)
             model_path = f"{semantic_def_path}/model.tmdl"
@@ -808,7 +813,8 @@ class TmdlGenerator(TmdlHelperMixin):
             return {"success": True, "message": "TMDL Generated", "created_files": created_files}
 
         except (KeyError, ValueError, TypeError, AttributeError, OSError, RuntimeError) as e:
-            log_error(f"TMDL Gen failed: {e}")
+            import traceback
+            log_error(f"TMDL Gen failed: {e}\n{traceback.format_exc()}")
             return {"success": False, "message": str(e), "failed_files": failed_files}
 
     def __init__(self, file_agent, folder_agent, action_logger: Optional[ActionLogger] = None):
