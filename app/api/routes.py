@@ -275,14 +275,72 @@ async def get_agent_activities(
     run_id: Optional[str] = None,
     space_id: Optional[str] = None,
     app_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    workbook_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    source_type: Optional[str] = None,
+    latest_only: Optional[bool] = False,
+    limit: Optional[int] = None,
 ):
-    if not run_id:
+    eff_run_id = run_id.strip() if run_id else None
+    eff_project_id = (project_id or space_id or "").strip() or None
+    eff_workbook_id = (workbook_id or app_id or "").strip() or None
+    eff_agent_name = agent_name.strip() if agent_name else None
+    target_agent_name = os.getenv("AGENT_NAME", "BI Engineering Agent")
+
+    if not eff_run_id and not (eff_project_id or eff_workbook_id):
         return JSONResponse(
             status_code=400,
-            content={"status": "error", "message": "run_id parameter is required."}
+            content={"status": "error", "message": "run_id or project_id/workbook_id parameter is required."}
         )
 
-    import os
+    def _is_bi_agent(name: Optional[str]) -> bool:
+        if not name:
+            return False
+        norm = str(name).strip().lower().replace("_", " ").replace("-", " ")
+        return norm in (
+            "generation agent",
+            "generation",
+            "bi engineering agent",
+            "bi engineering",
+            "bi engineer",
+            target_agent_name.lower().replace("_", " ").replace("-", " "),
+        )
+
+    def _filter_and_sort_activities(raw_docs: list, requested_agent: Optional[str] = None) -> list:
+        if not isinstance(raw_docs, list) or not raw_docs:
+            return []
+
+        # 1. Normalize agent_name and filter if requested
+        matching = []
+        for d in raw_docs:
+            if not isinstance(d, dict):
+                continue
+            item = dict(d)
+            if "_id" in item:
+                item["_id"] = str(item["_id"])
+
+            curr_agent = item.get("agent_name")
+            is_bi = _is_bi_agent(curr_agent)
+            if is_bi:
+                # Normalize legacy/variant names to current target agent dynamically
+                item["agent_name"] = target_agent_name
+
+            if requested_agent:
+                req_is_bi = _is_bi_agent(requested_agent)
+                if req_is_bi:
+                    if not is_bi:
+                        continue
+                else:
+                    if str(curr_agent or "").strip().lower() != requested_agent.strip().lower():
+                        continue
+
+            matching.append(item)
+
+        # 2. Sort dynamically descending by timestamp epoch (latest first!)
+        matching.sort(key=_extract_record_timestamp, reverse=True)
+        return matching
+
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
 
     def _enrich_activities(docs_list, client_instance=None):
@@ -296,10 +354,10 @@ async def get_agent_activities(
                     resolved_name = str(p).strip()
                     break
 
-        if not resolved_name and client_instance:
+        if not resolved_name and client_instance and eff_run_id:
             try:
                 for db in ["QT2F_Tableau", "QT2F"]:
-                    gen = client_instance[db]["generation_results"].find_one({"run_id": run_id.strip()})
+                    gen = client_instance[db]["generation_results"].find_one({"run_id": eff_run_id})
                     if gen:
                         candidate = (
                             gen.get("project_name")
@@ -331,17 +389,41 @@ async def get_agent_activities(
         try:
             import pymongo
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
-            for db_name in ["QT2F", "QT2F_Tableau"]:
-                coll = client[db_name]["agent_actions"]
-                docs = list(coll.find({"run_id": run_id.strip()}).sort("_id", -1))
-                if not docs:
-                    docs = list(client[db_name]["activities"].find({"run_id": run_id.strip()}).sort("_id", -1))
-                if docs:
-                    docs = _enrich_activities(docs, client)
-                    for d in docs:
-                        if "_id" in d:
-                            d["_id"] = str(d["_id"])
-                    return JSONResponse(status_code=200, content=docs)
+            target_dbs = ["QT2F", "QT2F_Tableau"]
+            if source_type:
+                st = source_type.lower().strip()
+                if st == "tableau":
+                    target_dbs = ["QT2F_Tableau"]
+                elif st == "qlik":
+                    target_dbs = ["QT2F"]
+
+            all_docs = []
+            for db_name in target_dbs:
+                for coll_name in ["agent_actions", "activities"]:
+                    try:
+                        coll = client[db_name][coll_name]
+                        query = {}
+                        if eff_run_id:
+                            query["run_id"] = eff_run_id
+                        elif eff_project_id or eff_workbook_id:
+                            if eff_project_id:
+                                query["$or"] = [{"project_id": eff_project_id}, {"space_id": eff_project_id}]
+                            if eff_workbook_id:
+                                query["$or"] = [{"workbook_id": eff_workbook_id}, {"app_id": eff_workbook_id}]
+                        docs = list(coll.find(query))
+                        all_docs.extend(docs)
+                    except Exception as err:
+                        logger.debug(f"Direct PyMongo query on {db_name}.{coll_name} failed: {err}")
+
+            if all_docs:
+                processed = _filter_and_sort_activities(all_docs, eff_agent_name)
+                processed = _enrich_activities(processed, client)
+                if processed:
+                    if latest_only:
+                        return JSONResponse(status_code=200, content=processed[0])
+                    if limit and limit > 0:
+                        processed = processed[:limit]
+                    return JSONResponse(status_code=200, content=processed)
         except Exception as err:
             logger.warning(f"Direct MongoDB query for activities failed: {err}")
 
@@ -349,11 +431,21 @@ async def get_agent_activities(
     import httpx
     from app.qlik.config import config as qlik_config
     bases = [
-        qlik_config.MONGO_API_URL,
-        os.getenv("TELEMETRY_LOCAL_API"),
         os.getenv("MONGODB_URL"),
+        os.getenv("MONGO_API_URL"),
         "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws",
+        "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws",
+        os.getenv("TELEMETRY_LOCAL_API"),
+        qlik_config.MONGO_API_URL,
     ]
+
+    remote_params = {}
+    if eff_run_id:
+        remote_params["run_id"] = eff_run_id
+    if eff_project_id:
+        remote_params["project_id"] = eff_project_id
+    if eff_workbook_id:
+        remote_params["workbook_id"] = eff_workbook_id
 
     for base in bases:
         if not base or not base.startswith("http"):
@@ -361,17 +453,23 @@ async def get_agent_activities(
         url = f"{base.rstrip('/')}/api/records/activities"
         try:
             async with httpx.AsyncClient() as http_client:
-                resp = await http_client.get(url, params={"run_id": run_id.strip()}, timeout=15)
+                resp = await http_client.get(url, params=remote_params, timeout=6)
                 if resp.status_code == 200:
                     data = resp.json()
-                    data = _enrich_activities(data, client)
-                    return JSONResponse(status_code=200, content=data)
+                    processed = _filter_and_sort_activities(data, eff_agent_name)
+                    processed = _enrich_activities(processed, client)
+                    if processed:
+                        if latest_only:
+                            return JSONResponse(status_code=200, content=processed[0])
+                        if limit and limit > 0:
+                            processed = processed[:limit]
+                        return JSONResponse(status_code=200, content=processed)
         except Exception as e:
             logger.warning(f"Failed to fetch activities from {url}: {e}")
 
     return JSONResponse(
         status_code=404,
-        content={"status": "error", "message": f"No activities found for run_id={run_id}"}
+        content={"status": "error", "message": f"No activities found for query (run_id={eff_run_id}, agent_name={eff_agent_name})"}
     )
 
 

@@ -68,7 +68,7 @@ class Config:
     # --- service --------------------------------------------------------
     PORT = _int("PORT", 5000)
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-    AGENT_NAME = os.getenv("AGENT_NAME", "Generation")
+    AGENT_NAME = os.getenv("AGENT_NAME", "BI Engineering Agent")
 
     @classmethod
     def devops_ready(cls) -> bool:

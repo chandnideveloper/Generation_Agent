@@ -1,4 +1,6 @@
 import os
+import uuid
+import datetime
 import logging
 from typing import Optional, Dict, Any
 import httpx
@@ -68,14 +70,17 @@ async def log_activity_async(
         
     eff_project_name = _resolve_project_name(project_name)
 
+    eff_agent_name = os.getenv("AGENT_NAME", "BI Engineering Agent")
     payload = {
+        "id": str(uuid.uuid4()),
         "run_id": run_id,
         "run_no": run_id,
         "project_name": eff_project_name,
-        "agent_name": "BI Engineering Agent",
+        "agent_name": eff_agent_name,
         "activity_summary": summary,
         "action": summary,
         "status": status,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "project_id": project_id,
         "space_id": project_id,
         "workbook_id": workbook_id,
@@ -130,14 +135,17 @@ def log_activity_sync(
 
     eff_project_name = _resolve_project_name(project_name)
         
+    eff_agent_name = os.getenv("AGENT_NAME", "BI Engineering Agent")
     payload = {
+        "id": str(uuid.uuid4()),
         "run_id": run_id,
         "run_no": run_id,
         "project_name": eff_project_name,
-        "agent_name": "BI Engineering Agent",
+        "agent_name": eff_agent_name,
         "activity_summary": summary,
         "action": summary,
         "status": status,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "project_id": project_id,
         "space_id": project_id,
         "workbook_id": workbook_id,

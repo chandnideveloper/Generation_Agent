@@ -1,3 +1,4 @@
+import os
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 
@@ -25,7 +26,7 @@ class CosmosLogRecord(BaseModel):
     run_id: str
     run_no: Optional[str] = None
     workbook_id: Optional[str] = None
-    agent_name: str = "BI Engineering Agent"
+    agent_name: str = Field(default_factory=lambda: os.getenv("AGENT_NAME", "BI Engineering Agent"))
     log_level: str
     message: str
     timestamp: str
@@ -43,7 +44,7 @@ class CosmosActivityRecord(BaseModel):
     error_detail: Optional[str] = None
     project_id: str
     workbook_id: str
-    agent_name: str
+    agent_name: str = Field(default_factory=lambda: os.getenv("AGENT_NAME", "BI Engineering Agent"))
     type: str = "agent_activity"
     payload: Optional[Dict[str, Any]] = Field(default_factory=dict)
 

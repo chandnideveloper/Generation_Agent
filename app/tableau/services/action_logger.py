@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class ActionLogger:
     def __init__(self):
-        self.agent_name = "BI Engineering Agent"
+        self.agent_name = os.getenv("AGENT_NAME", "BI Engineering Agent")
         self.project_name = None
         
         self.llm_client = None
