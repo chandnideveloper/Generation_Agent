@@ -201,7 +201,7 @@ def build_payload(level: str, message: str, details: Any = None, project_id=None
         "run_id": r_id,
         "run_no": r_id,
         "workbook_id": w_id,
-        "agent_name": "Generation Agent",
+        "agent_name": "BI Engineering Agent",
         "log_level": level.upper(),
         "message": str(message),
         "timestamp": datetime.datetime.utcnow().isoformat(),

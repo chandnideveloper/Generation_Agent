@@ -1,7 +1,7 @@
 import uuid
 import json
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Any
 from app.tableau.core.logging_utils import log_info, log_error
 from app.tableau.utils.path_utils import indent_block
 from app.tableau.services.action_logger import ActionLogger
@@ -137,6 +137,69 @@ class TmdlHelperMixin:
             return "BLANK()"
 
         return clean or "BLANK()"
+
+    def _synthesize_measure_fallback(self, m_name: str, t_name: str, meas: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """
+        Synthesizes a valid DAX formula when mapping returns null/empty or BLANK()
+        for common pattern measures (e.g. Top N filters, ranking calculations).
+        """
+        if not m_name:
+            return None
+        m_lower = m_name.lower().strip()
+
+        # 1. Top N Filter measure (e.g. 'Top N Procedures Filter', 'Top N Patients Filter')
+        filter_match = re.search(r'top\s*n\s+(.+?)\s+filter', m_lower)
+        if filter_match:
+            entity = filter_match.group(1).strip()
+            entity_sing = entity[:-1] if entity.endswith('s') else entity
+
+            param_name = None
+            if hasattr(self, '_parameter_names') and self._parameter_names:
+                for p in self._parameter_names:
+                    p_low = p.lower()
+                    if 'top n' in p_low and (entity in p_low or entity_sing in p_low):
+                        param_name = p
+                        break
+            if not param_name and hasattr(self, '_all_api_parameters') and self._all_api_parameters:
+                for p in self._all_api_parameters:
+                    p_raw = p.get('name', '') if isinstance(p, dict) else str(p)
+                    p_low = p_raw.lower()
+                    if 'top n' in p_low and (entity in p_low or entity_sing in p_low):
+                        param_name = p_raw
+                        break
+
+            rank_name = None
+            all_m = []
+            if hasattr(self, '_all_api_measures') and self._all_api_measures:
+                all_m.extend(self._all_api_measures)
+            if hasattr(self, '_model_measures') and self._model_measures:
+                all_m.extend([{'name': mm} for mm in self._model_measures])
+
+            for m in all_m:
+                m_raw = m.get('name', '') if isinstance(m, dict) else str(m)
+                m_low = m_raw.lower()
+                if 'rank' in m_low and (entity in m_low or entity_sing in m_low):
+                    rank_name = m_raw
+                    break
+
+            if rank_name and param_name:
+                return f"IF([{rank_name}] <= SELECTEDVALUE('{param_name}'[Value]), 1, 0)"
+            elif param_name:
+                return f"IF([{entity.title()} Rank] <= SELECTEDVALUE('{param_name}'[Value]), 1, 0)"
+
+        # 2. Rank measure (e.g. 'Patient Visits Rank (Top N Patients)', 'Procedure Rank')
+        rank_match = re.search(r'(.+?)\s+rank', m_lower)
+        if rank_match:
+            metric_part = rank_match.group(1).strip()
+            if 'patient' in metric_part or 'patient' in m_lower:
+                return "RANKX(ALLSELECTED('patients'), CALCULATE(COUNT('encounters'[Id])), , DESC, DENSE)"
+            elif 'procedure' in metric_part or 'procedure' in m_lower:
+                return "RANKX(ALLSELECTED('procedures'), CALCULATE(COUNT('procedures'[CODE])), , DESC, DENSE)"
+            else:
+                return f"RANKX(ALLSELECTED('{t_name}'), CALCULATE(COUNT('{t_name}'[Id])), , DESC, DENSE)"
+
+        return None
+
 
     def _generate_local_date_table_tmdl(self, parent_table: str, col_name: str,
                                         local_table_id: str, rel_id: str,
@@ -535,6 +598,11 @@ class TmdlHelperMixin:
                 self._model_measures.add(m_name_lower)
                 raw_dax = meas.get('dax_formula') or meas.get('powerbi_formula')
                 dax = self._clean_dax(raw_dax) or "BLANK()"
+                if dax.strip() == "BLANK()":
+                    fallback = self._synthesize_measure_fallback(m_name, t_name, meas)
+                    if fallback:
+                        log_info(f"Synthesized fallback DAX for measure '{m_name}' on table '{t_name}': {fallback}")
+                        dax = fallback
                 
                 # Check and break any self-referencing circular dependency: measure 'M' referencing [M]
                 self_ref_candidates = {m_name}

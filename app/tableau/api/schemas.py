@@ -25,7 +25,7 @@ class CosmosLogRecord(BaseModel):
     run_id: str
     run_no: Optional[str] = None
     workbook_id: Optional[str] = None
-    agent_name: str = "Generation Agent"
+    agent_name: str = "BI Engineering Agent"
     log_level: str
     message: str
     timestamp: str

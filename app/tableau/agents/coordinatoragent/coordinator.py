@@ -1513,7 +1513,10 @@ class CoordinatorAgent(AssistantAgent, FolderManagerMixin, MetadataExtractorMixi
             "project": project_metadata,
             "summary": {
                 "pages_generated": len(pages),
+                "total_tables": len(all_tables) + parameters_count,
                 "tables_processed": len(all_tables),
+                "source_tables": len(all_tables),
+                "parameter_tables": parameters_count,
                 "custom_sql_tables": len(api_data.get("custom_sql", [])) if api_data else 0,
                 "measures_created": len(measure_names),
                 "calculated_fields_converted": len(calculated_fields_metadata),

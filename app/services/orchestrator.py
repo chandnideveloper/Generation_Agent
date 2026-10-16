@@ -509,13 +509,20 @@ class MigrationOrchestrator:
         summary = clean_result.get("summary", {})
         project_meta = clean_result.get("project", {})
 
+        tables_count = summary.get("tables_processed", 0)
+        params_count = summary.get("parameters_generated", 0)
+        total_tables = summary.get("total_tables") or (tables_count + params_count)
+
         artifacts = ArtifactsSummary(
             semantic_model={
-                "tables": summary.get("tables_processed", 0),
+                "tables": total_tables,
+                "total_tables": total_tables,
+                "source_tables": tables_count,
+                "parameter_tables": params_count,
                 "custom_sql_tables": summary.get("custom_sql_tables", 0),
                 "measures": summary.get("measures_created", 0),
                 "calculated_fields": summary.get("calculated_fields_converted", 0),
-                "parameters": summary.get("parameters_generated", 0),
+                "parameters": params_count,
             },
             report={
                 "pages": summary.get("pages_generated", 0),

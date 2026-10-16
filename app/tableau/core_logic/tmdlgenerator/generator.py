@@ -201,6 +201,10 @@ class TmdlGenerator(TmdlHelperMixin):
                             self._model_measures.add(m_lower)
                         raw_meas_dax = tc.get("dax_formula") or tc.get("powerbi_formula") or "BLANK()"
                         cleaned_meas_dax = self._clean_dax(raw_meas_dax) or "BLANK()"
+                        if cleaned_meas_dax.strip() == "BLANK()":
+                            fallback = self._synthesize_measure_fallback(measure_name, name, tc)
+                            if fallback:
+                                cleaned_meas_dax = fallback
                         measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                         log_info(f"[add_parameters] Using '{measure_name}' as measure for parameter '{name}'")
@@ -223,6 +227,10 @@ class TmdlGenerator(TmdlHelperMixin):
                         self._model_measures.add(m_lower)
                     raw_meas_dax = m.get("dax_formula") or m.get("powerbi_formula") or "BLANK()"
                     cleaned_meas_dax = self._clean_dax(raw_meas_dax) or "BLANK()"
+                    if cleaned_meas_dax.strip() == "BLANK()":
+                        fallback = self._synthesize_measure_fallback(measure_name, name, m)
+                        if fallback:
+                            cleaned_meas_dax = fallback
                     measure_blocks.append(f"""    measure '{self._escape_tmdl_identifier(measure_name)}' =
         {indent_block(cleaned_meas_dax, 8).strip()}""")
                     log_info(f"[add_parameters] Using '{measure_name}' as top-level measure for parameter '{name}'")
@@ -324,6 +332,8 @@ class TmdlGenerator(TmdlHelperMixin):
                 parameters = api_data.get('parameters', [])
                 if not isinstance(parameters, list): parameters = []
             self._parameter_names = {self._sanitize_name(p.get('name')) for p in parameters if isinstance(p, dict) and p.get('name')}
+            self._all_api_measures = list(measures)
+            self._all_api_parameters = list(parameters)
             actions = api_data.get('actions', [])
             if not isinstance(actions, list): actions = []
 
