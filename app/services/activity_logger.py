@@ -25,24 +25,25 @@ def get_tableau_mongo_url() -> str:
 
 def _resolve_project_name(project_name: Optional[str] = None) -> str:
     """Dynamically resolve project_name from parameter, contextvars, or environment."""
-    if project_name and str(project_name).strip() and str(project_name).strip() not in ("Unknown", "null", "None"):
+    if project_name and str(project_name).strip() and str(project_name).strip() not in ("Unknown", "null", "None", ""):
         return str(project_name).strip()
     try:
         from app.tableau.core.logging_utils import get_project_name
         ctx_tb = get_project_name()
-        if ctx_tb and ctx_tb not in ("Unknown", "null", "None"):
+        if ctx_tb and str(ctx_tb).strip() not in ("Unknown", "null", "None", ""):
             return str(ctx_tb).strip()
     except Exception:
         pass
     try:
-        from app.qlik.util.logging_utils import _qlik_project_name_ctx
-        ctx_ql = _qlik_project_name_ctx.get()
-        if ctx_ql and ctx_ql not in ("Unknown", "null", "None"):
-            return str(ctx_ql).strip()
+        from app.qlik.util.logging_utils import get_qlik_logging_context
+        ctx_ql = get_qlik_logging_context()
+        ctx_pname = ctx_ql.get("project_name")
+        if ctx_pname and str(ctx_pname).strip() not in ("Unknown", "null", "None", ""):
+            return str(ctx_pname).strip()
     except Exception:
         pass
     env_name = os.getenv("PROJECT_NAME")
-    if env_name and env_name not in ("Unknown", "null", "None"):
+    if env_name and str(env_name).strip() not in ("Unknown", "null", "None", ""):
         return str(env_name).strip()
     return "Unknown"
 
@@ -76,6 +77,7 @@ async def log_activity_async(
         "run_id": run_id,
         "run_no": run_id,
         "project_name": eff_project_name,
+        "space_name": eff_project_name,
         "agent_name": eff_agent_name,
         "activity_summary": summary,
         "action": summary,
@@ -86,7 +88,11 @@ async def log_activity_async(
         "workbook_id": workbook_id,
         "app_id": workbook_id,
         "type": "agent_action",
-        "payload": {},
+        "payload": {
+            "project_name": eff_project_name,
+            "space_name": eff_project_name,
+            "app_name": eff_project_name,
+        },
     }
     
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
@@ -141,6 +147,7 @@ def log_activity_sync(
         "run_id": run_id,
         "run_no": run_id,
         "project_name": eff_project_name,
+        "space_name": eff_project_name,
         "agent_name": eff_agent_name,
         "activity_summary": summary,
         "action": summary,
@@ -151,7 +158,11 @@ def log_activity_sync(
         "workbook_id": workbook_id,
         "app_id": workbook_id,
         "type": "agent_action",
-        "payload": {},
+        "payload": {
+            "project_name": eff_project_name,
+            "space_name": eff_project_name,
+            "app_name": eff_project_name,
+        },
     }
     
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
