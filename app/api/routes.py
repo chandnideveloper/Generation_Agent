@@ -335,26 +335,6 @@ async def get_agent_activities(
                     if str(curr_agent or "").strip().lower() != requested_agent.strip().lower():
                         continue
 
-            # Normalize project_name / space_name across both Tableau and Qlik
-            proj = item.get("project_name")
-            if not proj or str(proj).strip() in ("Unknown", "null", "None", ""):
-                proj = item.get("space_name")
-            if not proj or str(proj).strip() in ("Unknown", "null", "None", ""):
-                payload_obj = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-                proj = (
-                    payload_obj.get("project_name")
-                    or payload_obj.get("space_name")
-                    or payload_obj.get("app_name")
-                    or payload_obj.get("new_app_name")
-                )
-            if proj and str(proj).strip() not in ("Unknown", "null", "None", ""):
-                item["project_name"] = str(proj).strip()
-
-            # Keep space_name aligned
-            if not item.get("space_name") or str(item.get("space_name")).strip() in ("Unknown", "null", "None", ""):
-                if item.get("project_name"):
-                    item["space_name"] = item["project_name"]
-
             matching.append(item)
 
         # 2. Sort dynamically descending by timestamp epoch (latest first!)
@@ -369,10 +349,7 @@ async def get_agent_activities(
         resolved_name = None
         for d in docs_list:
             if isinstance(d, dict):
-                p = d.get("project_name") or d.get("space_name")
-                if not p or str(p).strip() in ("Unknown", "null", "None", ""):
-                    payload_obj = d.get("payload") if isinstance(d.get("payload"), dict) else {}
-                    p = payload_obj.get("project_name") or payload_obj.get("space_name") or payload_obj.get("app_name")
+                p = d.get("project_name")
                 if p and str(p).strip() not in ("Unknown", "null", "None", ""):
                     resolved_name = str(p).strip()
                     break
@@ -386,61 +363,12 @@ async def get_agent_activities(
                             gen.get("project_name")
                             or (gen.get("payload") or {}).get("project", {}).get("name")
                             or (gen.get("payload") or {}).get("new_app_name")
-                            or (gen.get("payload") or {}).get("app_name")
-                            or gen.get("space_name")
                         )
                         if candidate and str(candidate).strip() not in ("Unknown", "null", "None", ""):
                             resolved_name = str(candidate).strip()
                             break
             except Exception:
                 pass
-
-        qlik_mongo = os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws"
-        tb_mongo = os.getenv("MONGODB_URL") or "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws"
-
-        if not resolved_name and eff_run_id:
-            import httpx
-            st = (source_type or "").lower().strip()
-            endpoints = []
-            if st == "qlik":
-                endpoints = [
-                    f"{qlik_mongo.rstrip('/')}/api/records/mapping?run_id={eff_run_id}",
-                    f"{qlik_mongo.rstrip('/')}/api/records/generation?run_id={eff_run_id}",
-                ]
-            elif st == "tableau":
-                endpoints = [
-                    f"{tb_mongo.rstrip('/')}/api/records/mapping?run_id={eff_run_id}",
-                    f"{tb_mongo.rstrip('/')}/api/records/generation?run_id={eff_run_id}",
-                ]
-            else:
-                endpoints = [
-                    f"{qlik_mongo.rstrip('/')}/api/records/mapping?run_id={eff_run_id}",
-                    f"{tb_mongo.rstrip('/')}/api/records/mapping?run_id={eff_run_id}",
-                    f"{qlik_mongo.rstrip('/')}/api/records/generation?run_id={eff_run_id}",
-                ]
-
-            for endpoint_url in endpoints:
-                try:
-                    with httpx.Client(timeout=12.0) as http_c:
-                        r = http_c.get(endpoint_url)
-                        if r.status_code == 200:
-                            data_json = r.json()
-                            rec = data_json[0] if isinstance(data_json, list) and data_json else (data_json if isinstance(data_json, dict) else None)
-                            if rec:
-                                cand = (
-                                    rec.get("project_name")
-                                    or (rec.get("payload") or {}).get("project_name")
-                                    or (rec.get("payload") or {}).get("workbook_metadata", {}).get("name")
-                                    or (rec.get("payload") or {}).get("project", {}).get("name")
-                                    or (rec.get("payload") or {}).get("new_app_name")
-                                    or (rec.get("payload") or {}).get("app_name")
-                                    or rec.get("space_name")
-                                )
-                                if cand and str(cand).strip() not in ("Unknown", "null", "None", ""):
-                                    resolved_name = str(cand).strip()
-                                    break
-                except Exception:
-                    pass
 
         if not resolved_name:
             env_proj = os.getenv("PROJECT_NAME")
@@ -453,9 +381,6 @@ async def get_agent_activities(
                     cur = d.get("project_name")
                     if not cur or str(cur).strip() in ("Unknown", "null", "None", ""):
                         d["project_name"] = resolved_name
-                    cur_sp = d.get("space_name")
-                    if not cur_sp or str(cur_sp).strip() in ("Unknown", "null", "None", ""):
-                        d["space_name"] = resolved_name
         return docs_list
 
     # 1. First check MongoDB directly
@@ -505,22 +430,14 @@ async def get_agent_activities(
     # 2. Check remote microservice
     import httpx
     from app.qlik.config import config as qlik_config
-
-    qlik_mongo = os.getenv("MONGO_API_URL") or "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws"
-    tb_mongo = os.getenv("MONGODB_URL") or "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws"
-
-    st = (source_type or "").lower().strip()
-    if st == "qlik":
-        candidate_bases = [qlik_mongo, qlik_config.MONGO_API_URL, os.getenv("TELEMETRY_LOCAL_API")]
-    elif st == "tableau":
-        candidate_bases = [tb_mongo, os.getenv("TELEMETRY_LOCAL_API")]
-    else:
-        candidate_bases = [tb_mongo, qlik_mongo, os.getenv("TELEMETRY_LOCAL_API"), qlik_config.MONGO_API_URL]
-
-    bases = []
-    for b in candidate_bases:
-        if b and b.startswith("http") and b.rstrip("/") not in bases:
-            bases.append(b.rstrip("/"))
+    bases = [
+        os.getenv("MONGODB_URL"),
+        os.getenv("MONGO_API_URL"),
+        "https://rizio6jk6d4psp4xzqzy2pl4nm0eibme.lambda-url.ap-southeast-2.on.aws",
+        "https://aodeclx4wyi6727uozoyktnqb40fyzvt.lambda-url.ap-southeast-2.on.aws",
+        os.getenv("TELEMETRY_LOCAL_API"),
+        qlik_config.MONGO_API_URL,
+    ]
 
     remote_params = {}
     if eff_run_id:
@@ -531,23 +448,24 @@ async def get_agent_activities(
         remote_params["workbook_id"] = eff_workbook_id
 
     for base in bases:
-        url = f"{base}/api/records/activities"
+        if not base or not base.startswith("http"):
+            continue
+        url = f"{base.rstrip('/')}/api/records/activities"
         try:
             async with httpx.AsyncClient() as http_client:
-                resp = await http_client.get(url, params=remote_params, timeout=15)
+                resp = await http_client.get(url, params=remote_params, timeout=6)
                 if resp.status_code == 200:
                     data = resp.json()
-                    if data:
-                        processed = _filter_and_sort_activities(data, eff_agent_name)
-                        processed = _enrich_activities(processed, client)
-                        if processed:
-                            if latest_only:
-                                return JSONResponse(status_code=200, content=processed[0])
-                            if limit and limit > 0:
-                                processed = processed[:limit]
-                            return JSONResponse(status_code=200, content=processed)
+                    processed = _filter_and_sort_activities(data, eff_agent_name)
+                    processed = _enrich_activities(processed, client)
+                    if processed:
+                        if latest_only:
+                            return JSONResponse(status_code=200, content=processed[0])
+                        if limit and limit > 0:
+                            processed = processed[:limit]
+                        return JSONResponse(status_code=200, content=processed)
         except Exception as e:
-            logger.warning(f"Failed to fetch activities from {url}: {repr(e)}")
+            logger.warning(f"Failed to fetch activities from {url}: {e}")
 
     return JSONResponse(
         status_code=404,

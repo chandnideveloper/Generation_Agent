@@ -40,6 +40,19 @@ def _norm(s: Any) -> str:
     return re.sub(r"[\s_\-]+", "-", str(s).strip().lower())
 
 
+def _extract_mapping_dict(row: Any) -> Dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    if isinstance(row.get("mapping_result"), dict) and row["mapping_result"]:
+        return row["mapping_result"]
+    if isinstance(row.get("payload"), dict) and row["payload"]:
+        p = row["payload"]
+        if isinstance(p.get("mapping_result"), dict) and p["mapping_result"]:
+            return p["mapping_result"]
+        return p
+    return row
+
+
 def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Optional[str], space_id: Optional[str] = None) -> bool:
     """True when `row` really is the mapping for the requested app/run.
 
@@ -51,7 +64,7 @@ def _identity_matches(row: Dict[str, Any], app_id: Optional[str], run_id: Option
     written without one.
     """
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    mapping = row.get("mapping_result") if isinstance(row.get("mapping_result"), dict) else (payload or row)
+    mapping = _extract_mapping_dict(row)
     metadata = mapping.get("workbook_metadata") if isinstance(mapping.get("workbook_metadata"), dict) else {}
 
     def _candidates(key: str) -> set:
@@ -91,8 +104,9 @@ def _bases() -> List[str]:
     extra = [b.strip() for b in os.getenv("MAPPING_API_FALLBACKS", "").split(",") if b.strip()]
     candidates = [
         config.MONGO_API_URL,
-        os.getenv("MONGODB_URL"),
+        os.getenv("MONGO_API_URL"),
         os.getenv("MAPPING_LOCAL_API"),
+        os.getenv("MONGODB_URL"),
         *extra,
     ]
 
@@ -154,7 +168,9 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str], space_id: Option
     if run_id:
         for r in _id_variants(run_id):
             paths.extend([
+                f"/api/records/mapping?run_id={r}&page_size=1",
                 f"/api/records/mapping?run_id={r}",
+                f"/records/mapping?run_id={r}&page_size=1",
                 f"/records/mapping?run_id={r}",
                 f"/api/mapping/by-run/{r}",
                 f"/mapping/by-run/{r}",
@@ -164,7 +180,9 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str], space_id: Option
     if app_id:
         for a in _id_variants(app_id):
             paths.extend([
+                f"/api/records/mapping?app_id={a}&page_size=1",
                 f"/api/records/mapping?app_id={a}",
+                f"/records/mapping?app_id={a}&page_size=1",
                 f"/records/mapping?app_id={a}",
                 f"/api/mapping/by-app/{a}",
                 f"/mapping/by-app/{a}",
@@ -196,12 +214,7 @@ def fetch_mapping(app_id: Optional[str], run_id: Optional[str], space_id: Option
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                mapping = (
-                    row.get("mapping_result")
-                    if isinstance(row.get("mapping_result"), dict) and row.get("mapping_result")
-                    else (row.get("payload") if isinstance(row.get("payload"), dict) and row.get("payload") else row)
-                )
-                m_dict = mapping if isinstance(mapping, dict) else row
+                m_dict = _extract_mapping_dict(row)
                 has_mapping = (
                     bool(m_dict.get("tables"))
                     or bool(m_dict.get("measures"))

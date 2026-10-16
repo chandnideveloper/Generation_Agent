@@ -72,22 +72,6 @@ class MigrationOrchestrator:
             or getattr(request, "folder_name", None)
             or getattr(request, "project_name", None)
         )
-        if source_type == "qlik" and (not dynamic_project_name or str(dynamic_project_name).strip() in ("Unknown", "null", "None", "")):
-            # Check if mapping document exists or fetch it to resolve app name before stage 1
-            try:
-                if getattr(request, "mapping_result", None):
-                    doc = request.mapping_result
-                else:
-                    from app.qlik.sources.mapping_client import fetch_mapping
-                    doc = fetch_mapping(app_id=workbook_id, run_id=request.run_id, space_id=project_id)
-                pl = doc.get("payload") if isinstance(doc.get("payload"), dict) else doc
-                meta = pl.get("workbook_metadata") or {}
-                cand_name = pl.get("project_name") or meta.get("name") or pl.get("app_name")
-                if cand_name and str(cand_name).strip() not in ("Unknown", "null", "None", ""):
-                    dynamic_project_name = str(cand_name).strip()
-            except Exception as map_err:
-                logger.debug(f"[Orchestrator] Could not resolve initial Qlik project name from mapping: {map_err}")
-
         if source_type == "tableau" and dynamic_project_name:
             from app.tableau.core.logging_utils import set_logging_context
             set_logging_context(project_id, workbook_id, request.run_id, project_name=dynamic_project_name)
@@ -121,32 +105,19 @@ class MigrationOrchestrator:
 
         # Resolve finalized project name from final_res or raw_result
         if isinstance(raw_result, dict):
-            cand = (
-                raw_result.get("new_app_name")
-                or raw_result.get("app_name")
-                or raw_result.get("project_name")
-                or (raw_result.get("project") or {}).get("name")
-            )
+            cand = raw_result.get("app_name") or raw_result.get("new_app_name") or raw_result.get("project_name")
             if cand and str(cand).strip() not in ("Unknown", "null", "None", ""):
                 dynamic_project_name = str(cand).strip()
-        if not dynamic_project_name and hasattr(final_res, "details") and isinstance(final_res.details, dict):
-            proj_dict = final_res.details.get("project") or {}
-            cand = (
-                final_res.details.get("new_app_name")
-                or final_res.details.get("app_name")
-                or final_res.details.get("project_name")
-                or (proj_dict.get("name") if isinstance(proj_dict, dict) else None)
-            )
-            if cand and str(cand).strip() not in ("Unknown", "null", "None", ""):
-                dynamic_project_name = str(cand).strip()
-
-        if dynamic_project_name:
-            if source_type == "tableau":
-                from app.tableau.core.logging_utils import set_project_name_context
-                set_project_name_context(dynamic_project_name)
-            elif source_type == "qlik":
-                from app.qlik.util.logging_utils import set_qlik_logging_context
-                set_qlik_logging_context(run_id=request.run_id, space_id=project_id, app_id=workbook_id, project_name=dynamic_project_name)
+        elif hasattr(final_res, "details") and isinstance(final_res.details, dict):
+            proj_dict = final_res.details.get("project")
+            if isinstance(proj_dict, dict) and proj_dict.get("name"):
+                dynamic_project_name = proj_dict.get("name")
+        if source_type == "tableau" and dynamic_project_name:
+            from app.tableau.core.logging_utils import set_project_name_context
+            set_project_name_context(dynamic_project_name)
+        elif source_type == "qlik" and dynamic_project_name:
+            from app.qlik.util.logging_utils import set_qlik_logging_context
+            set_qlik_logging_context(run_id=request.run_id, space_id=project_id, app_id=workbook_id, project_name=dynamic_project_name)
 
         # Agent Action: Stage 5
         if final_res.status == "success":
@@ -259,7 +230,7 @@ class MigrationOrchestrator:
                     "run_id": str(request.run_id).strip(),
                     "space_id": eff_space,
                     "app_id": eff_app,
-                    "space_name": str(dynamic_project_name or eff_space).strip(),
+                    "space_name": eff_space,
                     "project_id": eff_space,
                     "workbook_id": eff_app,
                     "project_name": str(dynamic_project_name or eff_app).strip(),

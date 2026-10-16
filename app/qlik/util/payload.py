@@ -31,13 +31,26 @@ def unwrap_mapping(document: Any) -> Dict[str, Any]:
     if isinstance(doc.get("mapping_result"), dict) and doc["mapping_result"]:
         res = dict(doc["mapping_result"])
     elif isinstance(doc.get("payload"), dict) and doc["payload"]:
-        res = dict(doc["payload"])
+        p = doc["payload"]
+        if isinstance(p.get("mapping_result"), dict) and p["mapping_result"]:
+            res = dict(p["mapping_result"])
+        else:
+            res = dict(p)
     elif isinstance(doc.get("parsing_result"), dict) and doc["parsing_result"]:
         res = dict(doc["parsing_result"])
 
-    for k in ("app_id", "app_name", "run_id", "space_id", "workspace_id", "source_type"):
+    if isinstance(res.get("mapping_result"), dict) and res["mapping_result"]:
+        nested = dict(res["mapping_result"])
+        for k, v in res.items():
+            if k not in nested and k != "mapping_result":
+                nested[k] = v
+        res = nested
+
+    for k in ("app_id", "app_name", "run_id", "space_id", "workspace_id", "source_type", "project_name"):
         if k in doc and k not in res:
             res[k] = doc[k]
+        if isinstance(doc.get("payload"), dict) and k in doc["payload"] and k not in res:
+            res[k] = doc["payload"][k]
 
     # Normalize tables & attach flat columns if present
     flat_cols = res.get("columns")
@@ -237,7 +250,7 @@ def app_identity(mapping: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "app_id": meta.get("app_id") or mapping.get("app_id"),
         "app_name": text(
-            meta.get("app_name") or app_meta.get("app_name") or mapping.get("app_name") or mapping.get("project_name"),
+            meta.get("app_name") or app_meta.get("app_name") or mapping.get("app_name") or mapping.get("project_name") or meta.get("name"),
             "Qlik App",
         ),
         "run_id": meta.get("run_id") or mapping.get("run_id"),
