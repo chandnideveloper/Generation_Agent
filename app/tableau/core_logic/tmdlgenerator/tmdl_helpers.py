@@ -391,7 +391,13 @@ class TmdlHelperMixin:
                 
                 if dax_formula:
                     formula = self._clean_dax(dax_formula)
-                    lines.append(f"    column '{self._escape_tmdl_identifier(c_name)}' = {formula}")
+                    clean_formula = formula.strip() if formula else ""
+                    if clean_formula and clean_formula.upper() != "BLANK()":
+                        formula_single = ' '.join(clean_formula.split())
+                        lines.append(f"    column '{self._escape_tmdl_identifier(c_name)}' = {formula_single}")
+                    else:
+                        lines.append(f"    column '{self._escape_tmdl_identifier(c_name)}'")
+                        lines.append(f"        sourceColumn: {c_name}")
                 else:
                     lines.append(f"    column '{self._escape_tmdl_identifier(c_name)}'")
                     lines.append(f"        sourceColumn: {c_name}")
@@ -421,7 +427,33 @@ class TmdlHelperMixin:
                     lines.append("")
             elif dax_formula:
                 formula = self._clean_dax(dax_formula)
-                lines.extend([f"    column '{self._escape_tmdl_identifier(c_name)}' =", indent_block(formula, 8), f"        dataType: {dtype}", "        summarizeBy: none", ""])
+                clean_formula = formula.strip() if formula else ""
+                if clean_formula and '=' in clean_formula and not clean_formula.lstrip().upper().startswith('VAR '):
+                    parts = clean_formula.split('=', 1)
+                    left_side = parts[0].strip()
+                    match = re.match(r"(?:'?[^'\[\]\n]+'?)?\[?([^\]]+)\]?", left_side)
+                    potential_name = match.group(1).strip() if match else left_side
+                    if potential_name.lower() == c_name.lower() or (
+                        '\n' not in left_side and '(' not in left_side and not any(op in left_side for op in ('+', '-', '*', '/', '<', '>', '{', '}'))
+                    ):
+                        clean_formula = parts[1].strip()
+
+                if not clean_formula or clean_formula.upper() == "BLANK()":
+                    col_lt = str(uuid.uuid4())
+                    lines.append(f"    column '{self._escape_tmdl_identifier(c_name)}'")
+                    lines.append(f"        dataType: {dtype}")
+                    lines.append(f"        lineageTag: {col_lt}")
+                    lines.append("        summarizeBy: none")
+                    lines.append(f"        sourceColumn: {c_name}")
+                    lines.append("")
+                else:
+                    col_lt = str(uuid.uuid4())
+                    formula_single = ' '.join(clean_formula.split())
+                    lines.append(f"    column '{self._escape_tmdl_identifier(c_name)}' = {formula_single}")
+                    lines.append(f"        dataType: {dtype}")
+                    lines.append(f"        lineageTag: {col_lt}")
+                    lines.append("        summarizeBy: none")
+                    lines.append("")
             else:
                 # Standard source column
                 col_lt = str(uuid.uuid4())
@@ -566,13 +598,16 @@ class TmdlHelperMixin:
                         lines.append("        annotation UnderlyingDateTimeDataType = Date")
                         lines.append("")
                 else:
+                    calc_col_lt = str(uuid.uuid4())
                     lines.append(f"    column '{self._escape_tmdl_identifier(c_name)}' = {formula_single}")
                     lines.append(f"        dataType: {calc_dtype}")
                     if calc_dtype == 'dateTime':
                         rct_lower = str(raw_calc_type).lower()
                         format_str = "General Date" if 'time' in rct_lower or 'datetime' in rct_lower else "Long Date"
                         lines.append(f"        formatString: {format_str}")
-                    lines.extend(["", "        summarizeBy: none", ""])
+                    lines.append(f"        lineageTag: {calc_col_lt}")
+                    lines.append("        summarizeBy: none")
+                    lines.append("")
 
         if extra_measures:
             if not hasattr(self, '_model_measures') or self._model_measures is None:

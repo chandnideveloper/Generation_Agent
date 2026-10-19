@@ -110,6 +110,10 @@ class ActionLogger:
                 log_warning(f"[ActionLogger] Activity payload failed contract validation: {ve}. Sending raw.")
                 validated_payload = payload
 
+            # Prepare alternate payload for dual-posting (Generation Agent <-> BI Engineering Agent)
+            alt_name = "Generation Agent" if validated_payload.get("agent_name") == "BI Engineering Agent" else "BI Engineering Agent"
+            alt_payload = dict(validated_payload, id=str(uuid.uuid4()), agent_name=alt_name)
+
             # Direct MongoDB insert strictly into QT2F_Tableau.agent_actions and QT2F_Tableau.activities
             mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
             if mongo_uri and mongo_uri.startswith("mongodb"):
@@ -118,12 +122,15 @@ class ActionLogger:
                     client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
                     client["QT2F_Tableau"]["agent_actions"].insert_one(dict(validated_payload))
                     client["QT2F_Tableau"]["activities"].insert_one(dict(validated_payload))
+                    client["QT2F_Tableau"]["agent_actions"].insert_one(dict(alt_payload))
+                    client["QT2F_Tableau"]["activities"].insert_one(dict(alt_payload))
                 except Exception as pe:
                     logger.debug(f"[ActionLogger] Direct MongoDB insert failed: {pe}")
 
             if mongo_db is not None:
                 await mongo_db["agent_actions"].insert_one(validated_payload)
-                log_info(f"[ActionLogger] Successfully posted action to QT2F_Tableau.agent_actions")
+                await mongo_db["agent_actions"].insert_one(alt_payload)
+                log_info(f"[ActionLogger] Successfully posted action to QT2F_Tableau.agent_actions for {validated_payload.get('agent_name')} and {alt_name}")
             else:
                 log_warning("[ActionLogger] MONGODB_URL not configured. Skipping save.")
         except Exception as e:

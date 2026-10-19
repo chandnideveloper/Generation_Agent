@@ -328,7 +328,8 @@ def build_column(
                 is_calc = False
 
     if is_calc and dax_expr and not dax_expr.startswith("="):
-        lines.append(f"{INDENT}column {quote_tmdl(name)} = {dax_expr}")
+        dax_single = ' '.join(dax_expr.strip().split())
+        lines.append(f"{INDENT}column {quote_tmdl(name)} = {dax_single}")
         lines.append(f"{INDENT*2}dataType: {data_type}")
         lines.append(f"{INDENT*2}lineageTag: {lineage_tag(f'col:{table}.{name}')}")
         lines.append(f"{INDENT*2}summarizeBy: {summarize_by(data_type, is_key, col_name=name)}")

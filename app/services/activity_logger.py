@@ -91,6 +91,9 @@ async def log_activity_async(
     
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
 
+    alt_name = "Generation Agent" if payload.get("agent_name") == "BI Engineering Agent" else "BI Engineering Agent"
+    alt_payload = dict(payload, id=str(uuid.uuid4()), agent_name=alt_name)
+
     # 1. Direct MongoDB insertion strictly to target_db.agent_actions and target_db.activities
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     if mongo_uri and mongo_uri.startswith("mongodb"):
@@ -99,6 +102,8 @@ async def log_activity_async(
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
             client[target_db]["agent_actions"].insert_one(dict(payload))
             client[target_db]["activities"].insert_one(dict(payload))
+            client[target_db]["agent_actions"].insert_one(dict(alt_payload))
+            client[target_db]["activities"].insert_one(dict(alt_payload))
             return
         except Exception as err:
             logger.debug(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")
@@ -109,8 +114,6 @@ async def log_activity_async(
     try:
         async with httpx.AsyncClient() as client:
             await client.post(url, json=payload, timeout=3.0)
-            alt_name = "Generation Agent" if payload.get("agent_name") == "BI Engineering Agent" else "BI Engineering Agent"
-            alt_payload = dict(payload, id=str(uuid.uuid4()), agent_name=alt_name)
             await client.post(url, json=alt_payload, timeout=3.0)
     except Exception as e:
         logger.debug(f"[ActivityLogger] Failed to log async activity to {url}: {e}")
@@ -158,6 +161,9 @@ def log_activity_sync(
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
 
     def _do_post():
+        alt_name = "Generation Agent" if payload.get("agent_name") == "BI Engineering Agent" else "BI Engineering Agent"
+        alt_payload = dict(payload, id=str(uuid.uuid4()), agent_name=alt_name)
+
         mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
         if mongo_uri and mongo_uri.startswith("mongodb"):
             try:
@@ -165,6 +171,8 @@ def log_activity_sync(
                 client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
                 client[target_db]["agent_actions"].insert_one(dict(payload))
                 client[target_db]["activities"].insert_one(dict(payload))
+                client[target_db]["agent_actions"].insert_one(dict(alt_payload))
+                client[target_db]["activities"].insert_one(dict(alt_payload))
                 return
             except Exception as err:
                 logger.debug(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")
@@ -173,8 +181,6 @@ def log_activity_sync(
         url = f"{target_base}/api/records/activities"
         try:
             requests.post(url, json=payload, timeout=(1, 3))
-            alt_name = "Generation Agent" if payload.get("agent_name") == "BI Engineering Agent" else "BI Engineering Agent"
-            alt_payload = dict(payload, id=str(uuid.uuid4()), agent_name=alt_name)
             requests.post(url, json=alt_payload, timeout=(1, 3))
         except Exception as e:
             logger.debug(f"[ActivityLogger] Failed to log sync activity to {url}: {e}")

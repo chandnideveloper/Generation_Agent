@@ -755,7 +755,13 @@ class TmdlGenerator:
                 
                 if dax_formula:
                     formula = self._clean_dax(dax_formula, is_measure=False, table_to_cols=table_to_cols, display_to_qualified=display_to_qualified)
-                    lines.append(f"    column '{c_name}' = {formula}")
+                    clean_formula = formula.strip() if formula else ""
+                    if clean_formula and clean_formula.upper() != "BLANK()":
+                        formula_single = ' '.join(clean_formula.split())
+                        lines.append(f"    column '{c_name}' = {formula_single}")
+                    else:
+                        lines.append(f"    column '{c_name}'")
+                        lines.append(f"        sourceColumn: {c_name}")
                 else:
                     lines.append(f"    column '{c_name}'")
                     lines.append(f"        sourceColumn: {c_name}")
@@ -778,11 +784,33 @@ class TmdlGenerator:
                     lines.append("")
             elif dax_formula:
                 formula = self._clean_dax(dax_formula, is_measure=False, table_to_cols=table_to_cols, display_to_qualified=display_to_qualified)
-                lines.append(f"    column '{c_name}' =")
-                lines.append(indent_block(formula, 8))
-                lines.append(f"        dataType: {dtype}")
-                lines.append(f"        summarizeBy: none")
-                lines.append("")
+                clean_formula = formula.strip() if formula else ""
+                if clean_formula and '=' in clean_formula and not clean_formula.lstrip().upper().startswith('VAR '):
+                    parts = clean_formula.split('=', 1)
+                    left_side = parts[0].strip()
+                    match = re.match(r"(?:'?[^'\[\]\n]+'?)?\[?([^\]]+)\]?", left_side)
+                    potential_name = match.group(1).strip() if match else left_side
+                    if potential_name.lower() == c_name.lower() or (
+                        '\n' not in left_side and '(' not in left_side and not any(op in left_side for op in ('+', '-', '*', '/', '<', '>', '{', '}'))
+                    ):
+                        clean_formula = parts[1].strip()
+
+                if not clean_formula or clean_formula.upper() == "BLANK()":
+                    col_lt = str(uuid.uuid4())
+                    lines.append(f"    column '{c_name}'")
+                    lines.append(f"        dataType: {dtype}")
+                    lines.append(f"        lineageTag: {col_lt}")
+                    lines.append("        summarizeBy: none")
+                    lines.append(f"        sourceColumn: {c_name}")
+                    lines.append("")
+                else:
+                    col_lt = str(uuid.uuid4())
+                    formula_single = ' '.join(clean_formula.split())
+                    lines.append(f"    column '{c_name}' = {formula_single}")
+                    lines.append(f"        dataType: {dtype}")
+                    lines.append(f"        lineageTag: {col_lt}")
+                    lines.append("        summarizeBy: none")
+                    lines.append("")
             else:
                 col_lt = str(uuid.uuid4())
                 lines.append(f"    column '{c_name}'")
@@ -905,11 +933,12 @@ class TmdlGenerator:
                         lines.append("        annotation UnderlyingDateTimeDataType = Date")
                         lines.append("")
                 else:
+                    calc_col_lt = str(uuid.uuid4())
                     lines.append(f"    column '{c_name}' = {formula_single}")
                     lines.append(f"        dataType: {calc_dtype}")
                     if calc_dtype == 'dateTime':
                         lines.append("        formatString: Long Date")
-                    lines.append("")
+                    lines.append(f"        lineageTag: {calc_col_lt}")
                     lines.append("        summarizeBy: none")
                     lines.append("") 
 
