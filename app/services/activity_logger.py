@@ -113,8 +113,8 @@ async def log_activity_async(
     url = f"{target_base}/api/records/activities"
     try:
         async with httpx.AsyncClient() as client:
-            await client.post(url, json=payload, timeout=3.0)
-            await client.post(url, json=alt_payload, timeout=3.0)
+            await client.post(url, json=payload, timeout=15.0)
+            await client.post(url, json=alt_payload, timeout=15.0)
     except Exception as e:
         logger.debug(f"[ActivityLogger] Failed to log async activity to {url}: {e}")
 
@@ -180,8 +180,8 @@ def log_activity_sync(
         target_base = get_mongo_api_url() if source_type == "qlik" else get_tableau_mongo_url()
         url = f"{target_base}/api/records/activities"
         try:
-            requests.post(url, json=payload, timeout=(1, 3))
-            requests.post(url, json=alt_payload, timeout=(1, 3))
+            requests.post(url, json=payload, timeout=(5.0, 15.0))
+            requests.post(url, json=alt_payload, timeout=(5.0, 15.0))
         except Exception as e:
             logger.debug(f"[ActivityLogger] Failed to log sync activity to {url}: {e}")
             

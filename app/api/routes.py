@@ -271,6 +271,14 @@ async def get_migration_status(
     "/api/records/activities/qlik",
     summary="Alias for Qlik agent activities",
 )
+@router.get(
+    "/agent-actions",
+    summary="Alias for agent actions / activities",
+)
+@router.get(
+    "/records/agent-actions",
+    summary="Alias for records/agent-actions",
+)
 async def get_agent_activities(
     run_id: Optional[str] = None,
     space_id: Optional[str] = None,
@@ -313,6 +321,7 @@ async def get_agent_activities(
 
         # 1. Normalize agent_name and filter if requested
         matching = []
+        seen = set()
         for d in raw_docs:
             if not isinstance(d, dict):
                 continue
@@ -334,6 +343,17 @@ async def get_agent_activities(
                 else:
                     if str(curr_agent or "").strip().lower() != requested_agent.strip().lower():
                         continue
+
+            # De-duplicate dual-posted records if any
+            dedup_key = (
+                item.get("run_id") or item.get("run_no"),
+                item.get("action") or item.get("activity_summary"),
+                item.get("status"),
+                str(item.get("created_at") or item.get("timestamp") or "")[:19]
+            )
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
 
             matching.append(item)
 
@@ -442,10 +462,19 @@ async def get_agent_activities(
     remote_params = {}
     if eff_run_id:
         remote_params["run_id"] = eff_run_id
+        remote_params["run_no"] = eff_run_id
     if eff_project_id:
         remote_params["project_id"] = eff_project_id
+        remote_params["space_id"] = eff_project_id
+        remote_params["workspace_id"] = eff_project_id
     if eff_workbook_id:
         remote_params["workbook_id"] = eff_workbook_id
+        remote_params["app_id"] = eff_workbook_id
+    # If the user queried for a BI/Generation agent, do not restrict remote agent_name to "Generation Agent",
+    # because remote MongoDB may store records as "BI Engineering Agent" (or vice-versa).
+    # We fetch all run activities and let _filter_and_sort_activities normalize & filter locally.
+    if eff_agent_name and not _is_bi_agent(eff_agent_name):
+        remote_params["agent_name"] = eff_agent_name
 
     for base in bases:
         if not base or not base.startswith("http"):
@@ -453,7 +482,7 @@ async def get_agent_activities(
         url = f"{base.rstrip('/')}/api/records/activities"
         try:
             async with httpx.AsyncClient() as http_client:
-                resp = await http_client.get(url, params=remote_params, timeout=6)
+                resp = await http_client.get(url, params=remote_params, timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
                     processed = _filter_and_sort_activities(data, eff_agent_name)
