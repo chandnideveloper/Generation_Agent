@@ -288,6 +288,19 @@ def sheets(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
     sh = mapping.get("sheets")
     if sh:
         return [s for s in as_list(sh) if isinstance(s, dict)]
+    db = mapping.get("dashboards")
+    if db:
+        res = []
+        for d in as_list(db):
+            if isinstance(d, dict):
+                item = dict(d)
+                title = item.get("dashboard_name") or item.get("dashboard_title") or item.get("title") or item.get("name")
+                if title:
+                    item.setdefault("sheet_name", title)
+                    item.setdefault("title", title)
+                res.append(item)
+        if res:
+            return res
     app_layout = as_dict(mapping.get("app_layout"))
     return [s for s in as_list(app_layout.get("sheets")) if isinstance(s, dict)]
 

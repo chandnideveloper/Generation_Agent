@@ -39,14 +39,18 @@ def sheet_grid(
     sheet: Dict[str, Any],
     visuals: Optional[Any] = None,
 ) -> Tuple[float, float]:
-    grid = as_dict(as_dict(sheet).get("grid")) or as_dict(as_dict(sheet).get("properties"))
+    grid = (
+        as_dict(as_dict(sheet).get("grid"))
+        or as_dict(as_dict(sheet).get("grid_layout"))
+        or as_dict(as_dict(sheet).get("properties"))
+    )
     columns = _number(grid.get("columns"), 0)
     rows = _number(grid.get("rows") or grid.get("customRowBase"), 0)
 
     # Detect true column/row bounds from visuals
+    max_col = 0
+    max_row = 0
     if visuals:
-        max_col = 0
-        max_row = 0
         for v in as_list(visuals):
             pos = (
                 as_dict(v.get("layout"))
@@ -59,12 +63,12 @@ def sheet_grid(
             max_col = max(max_col, c)
             max_row = max(max_row, r)
 
-        if not columns or max_col > columns:
-            columns = float(max_col) if max_col > 0 else FALLBACK_COLUMNS
-        if not rows or max_row > rows:
-            rows = float(max_row) if max_row > 0 else FALLBACK_ROWS
+    # In Qlik Sense, standard grid is 24 columns x 12 rows.
+    # Grid dimensions must never shrink below standard bounds even if visuals only occupy a subset.
+    eff_columns = max(columns or FALLBACK_COLUMNS, float(max_col) if max_col > 0 else FALLBACK_COLUMNS)
+    eff_rows = max(rows or FALLBACK_ROWS, float(max_row) if max_row > 0 else FALLBACK_ROWS)
 
-    return columns or FALLBACK_COLUMNS, rows or FALLBACK_ROWS
+    return eff_columns, eff_rows
 
 
 def to_canvas(
@@ -168,8 +172,7 @@ def to_canvas(
         rowspan = _number(rowspan_val, rows / 3)
 
         scale_x = config.CANVAS_WIDTH / float(columns)
-        # In Qlik Sense, row unit height is 60px (720 / 12 = 60). For scrolling sheets (>12 rows),
-        # each row is 60px; for standard 12-row sheets, row_height is 60.0px.
+        # In Qlik Sense, standard row unit height is 60px (720 / 12 = 60).
         row_height = 60.0
 
         computed_x = int(round(col * scale_x))
@@ -308,6 +311,10 @@ def compute_sheet_layout(
             return True
         if pos.get("col") is not None and pos.get("row") is not None:
             return True
+        if pos.get("target") and pos["target"].get("x") is not None:
+            return True
+        if lay.get("pixel_bounds_720p"):
+            return True
         if lay.get("x") is not None and lay.get("y") is not None:
             return True
         if pos.get("x") is not None and pos.get("y") is not None:
@@ -321,7 +328,7 @@ def compute_sheet_layout(
     if explicit_count > len(sheet_visuals) // 2:
         # Most visuals have explicit coordinates: calculate bounds directly
         columns, rows = grid
-        base_h = max(config.CANVAS_HEIGHT, int(round(rows * 60.0))) if rows > 12 else config.CANVAS_HEIGHT
+        base_h = max(config.CANVAS_HEIGHT, int(round(rows * 60.0)))
         prelim = [to_canvas(v, grid, i, canvas_height=base_h) for i, v in enumerate(sheet_visuals)]
         max_bottom = max((p["y"] + p["height"] for p in prelim), default=base_h)
         # Avoid artificial +40px inflation that distorts row height scaling

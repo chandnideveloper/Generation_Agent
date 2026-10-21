@@ -91,9 +91,6 @@ async def log_activity_async(
     
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
 
-    alt_name = "Generation Agent" if payload.get("agent_name") == "BI Engineering Agent" else "BI Engineering Agent"
-    alt_payload = dict(payload, id=str(uuid.uuid4()), agent_name=alt_name)
-
     # 1. Direct MongoDB insertion strictly to target_db.agent_actions and target_db.activities
     mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     if mongo_uri and mongo_uri.startswith("mongodb"):
@@ -102,21 +99,20 @@ async def log_activity_async(
             client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
             client[target_db]["agent_actions"].insert_one(dict(payload))
             client[target_db]["activities"].insert_one(dict(payload))
-            client[target_db]["agent_actions"].insert_one(dict(alt_payload))
-            client[target_db]["activities"].insert_one(dict(alt_payload))
             return
         except Exception as err:
-            logger.debug(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")
+            logger.warning(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")
 
     # 2. HTTP POST fallback to microservice /api/records/activities
     target_base = get_mongo_api_url() if source_type == "qlik" else get_tableau_mongo_url()
     url = f"{target_base}/api/records/activities"
     try:
         async with httpx.AsyncClient() as client:
-            await client.post(url, json=payload, timeout=15.0)
-            await client.post(url, json=alt_payload, timeout=15.0)
+            resp = await client.post(url, json=payload, timeout=20.0)
+            if resp.status_code not in (200, 201):
+                logger.warning(f"[ActivityLogger] HTTP POST activity to {url} returned {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        logger.debug(f"[ActivityLogger] Failed to log async activity to {url}: {e}")
+        logger.warning(f"[ActivityLogger] Failed to log async activity to {url}: {e}")
 
 def log_activity_sync(
     run_id: str,
@@ -161,9 +157,6 @@ def log_activity_sync(
     target_db = "QT2F" if source_type == "qlik" else "QT2F_Tableau"
 
     def _do_post():
-        alt_name = "Generation Agent" if payload.get("agent_name") == "BI Engineering Agent" else "BI Engineering Agent"
-        alt_payload = dict(payload, id=str(uuid.uuid4()), agent_name=alt_name)
-
         mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
         if mongo_uri and mongo_uri.startswith("mongodb"):
             try:
@@ -171,19 +164,18 @@ def log_activity_sync(
                 client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
                 client[target_db]["agent_actions"].insert_one(dict(payload))
                 client[target_db]["activities"].insert_one(dict(payload))
-                client[target_db]["agent_actions"].insert_one(dict(alt_payload))
-                client[target_db]["activities"].insert_one(dict(alt_payload))
                 return
             except Exception as err:
-                logger.debug(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")
+                logger.warning(f"[ActivityLogger] Direct MongoDB insert to {target_db}.agent_actions failed: {err}")
 
         target_base = get_mongo_api_url() if source_type == "qlik" else get_tableau_mongo_url()
         url = f"{target_base}/api/records/activities"
         try:
-            requests.post(url, json=payload, timeout=(5.0, 15.0))
-            requests.post(url, json=alt_payload, timeout=(5.0, 15.0))
+            resp = requests.post(url, json=payload, timeout=(5.0, 20.0))
+            if resp.status_code not in (200, 201):
+                logger.warning(f"[ActivityLogger] HTTP POST sync activity to {url} returned {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
-            logger.debug(f"[ActivityLogger] Failed to log sync activity to {url}: {e}")
+            logger.warning(f"[ActivityLogger] Failed to log sync activity to {url}: {e}")
             
     _TELEMETRY_POOL.submit(_do_post)
 
