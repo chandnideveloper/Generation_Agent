@@ -270,6 +270,59 @@ def build_filter_config(
             built.append(_not_blank_filter(name, entity, prop))
             seen_filter_keys.add((entity, prop, "not_blank"))
 
+    # 3. Process visual-level top_n or title Top N
+    import re
+    has_topn = any(k[2] == "topn" for k in seen_filter_keys)
+    vis_dims = (
+        as_list(source.get("dimensions"))
+        or as_list(fabric.get("dimensions"))
+        or as_list(source.get("columns"))
+        or as_list((visual.get("power_bi_visual_type") or {}).get("columns"))
+    )
+    if not has_topn and vis_dims:
+        title_str = text(visual.get("visual_title") or visual.get("title") or visual.get("name") or "")
+        topn_match = re.search(r"\bTop\s+(\d+)\b", title_str, re.IGNORECASE)
+        top_n_items = as_list(visual.get("top_n"))
+        limit_val = None
+        if top_n_items:
+            t0 = as_dict(top_n_items[0])
+            limit_val = t0.get("value") or t0.get("limit") or t0.get("count") or t0.get("limit_value")
+        if not limit_val and topn_match:
+            try:
+                limit_val = int(topn_match.group(1))
+            except (ValueError, TypeError):
+                limit_val = None
+
+        if limit_val:
+            first_dim = vis_dims[0]
+            dim_field = text(first_dim.get("name") or first_dim.get("field") if isinstance(first_dim, dict) else first_dim)
+            entity = None
+            prop = dim_field
+            df_lower = dim_field.lower()
+            if field_resolver and df_lower in field_resolver:
+                entity, prop = field_resolver[df_lower]
+            elif dim_field in column_home:
+                entity = column_home[dim_field]
+
+            if entity and prop:
+                vis_meas = (
+                    as_list(source.get("measures"))
+                    or as_list(fabric.get("measures"))
+                    or as_list(source.get("rows"))
+                    or as_list((visual.get("power_bi_visual_type") or {}).get("rows"))
+                )
+                first_meas = vis_meas[0] if vis_meas else None
+                order_prop = text(first_meas.get("name") or first_meas.get("field") if isinstance(first_meas, dict) else first_meas) if first_meas else None
+                name = lineage_tag(f"filter:auto_topn:{prop}")[:20]
+                built.append(_top_n_filter(
+                    name, entity, prop,
+                    int(limit_val),
+                    "Top",
+                    measure_home.get(order_prop) if order_prop else None,
+                    order_prop,
+                ))
+                seen_filter_keys.add((entity, prop, "topn"))
+
     return {"filters": built}
 
 

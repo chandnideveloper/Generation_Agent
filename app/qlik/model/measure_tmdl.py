@@ -419,7 +419,15 @@ def group_by_table(
         if not table or table == ORPHAN_TABLE:
             continue
 
-        dax_expr = text(fabric.get("dax_expression") or column.get("dax_expression") or column.get("dax"))
+        dax_expr = text(
+            fabric.get("dax_expression")
+            or column.get("dax_expression")
+            or column.get("dax_formula")
+            or column.get("dax")
+            or column.get("formula")
+            or column.get("expression")
+            or fabric.get("tmdl")
+        )
         name = text(column.get("name") or fabric.get("name") or column.get("field"), "Dimension").strip()
         c_name = clean_tmdl_name(name).lower()
 
@@ -463,11 +471,19 @@ def group_by_table(
             if not dax_expr:
                 dax_expr = f"'{table}'[{table_cols[0]}]" if table_cols else "BLANK()"
 
+        # Infer calculated column data type
+        calc_dt = fabric.get("data_type") or column.get("power_bi_datatype") or column.get("bi_datatype") or column.get("data_type")
+        if not calc_dt and dax_expr:
+            dax_clean = dax_expr.strip().lower()
+            if dax_clean.startswith("month(") or dax_clean.startswith("year(") or dax_clean.startswith("day(") or dax_clean.startswith("datediff("):
+                calc_dt = "int64"
+        data_type = to_tmdl_type(calc_dt) or "string"
+
         col_copy = dict(column)
         fab_copy = dict(fabric)
         fab_copy["dax_expression"] = dax_expr
         fab_copy["is_calculated"] = True
-        fab_copy.setdefault("data_type", "string")
+        fab_copy["data_type"] = data_type
         col_copy["fabric"] = fab_copy
         col_copy["dax_expression"] = dax_expr
 

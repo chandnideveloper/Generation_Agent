@@ -125,15 +125,32 @@ def _entity_maps(mapping: Dict[str, Any]):
         dim_table = _clean_table_name(text(dim_fabric.get("table") or dimension.get("target_table") or dimension.get("table_name") or (dimension.get("tables") or [""])[0]))
         dax_expr = text(dim_fabric.get("dax_expression") or dim_fabric.get("tmdl") or dimension.get("dax_formula"))
 
-        # Check if the dimension references a specific column like 'Customers'[customer_name]
+        # Check if the dimension references a specific column or expression
         col_match = re.search(r"'([^']+)'\[([^\]]+)\]", dax_expr)
-        if col_match:
+        is_pure_alias = bool(col_match and re.fullmatch(r"\s*'([^']+)'\[([^\]]+)\]\s*", dax_expr))
+
+        if is_pure_alias and col_match:
             target_t, target_c = col_match.group(1), col_match.group(2)
             target_t_clean = _clean_table_name(target_t)
             nl = name.lower()
             field_resolver[nl] = (target_t_clean, target_c)
             field_resolver[nl + " name"] = (target_t_clean, target_c)
             field_resolver[nl + "s"] = (target_t_clean, target_c)
+            field_resolver[f"{target_t_clean}.{name}".lower()] = (target_t_clean, target_c)
+            field_resolver[f"{target_t_clean}.{target_c}".lower()] = (target_t_clean, target_c)
+            if name not in column_home:
+                column_home[name] = target_t_clean
+        elif col_match:
+            # Calculated column expression referencing columns, e.g. Month('Loads'[load_date])
+            # In Power BI TMDL, this is created as a calculated column named `name` on target_t!
+            target_t = col_match.group(1)
+            target_t_clean = _clean_table_name(target_t)
+            nl = name.lower()
+            field_resolver[nl] = (target_t_clean, name)
+            field_resolver[nl + " name"] = (target_t_clean, name)
+            field_resolver[nl + "s"] = (target_t_clean, name)
+            field_resolver[f"{target_t_clean}.{name}".lower()] = (target_t_clean, name)
+            field_resolver[f"[{target_t_clean}].[{name}]".lower()] = (target_t_clean, name)
             if name not in column_home:
                 column_home[name] = target_t_clean
         elif dim_table and name:

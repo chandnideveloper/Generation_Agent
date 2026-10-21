@@ -267,6 +267,19 @@ def build_visual(
     combo_col_meas = _names(ax_map.get("column_values")) or _names(pbi_dict.get("column_measures"))
     combo_line_meas = _names(ax_map.get("line_values")) or _names(pbi_dict.get("line_measures"))
 
+    target_pbi_type = text(
+        pbi_dict.get("power_bi_visual_type")
+        or pbi_dict.get("target_visual_type")
+        or visual.get("power_bi_visual_type")
+        or visual.get("target_visual_type")
+        or ""
+    ).lower()
+    is_slicer_visual = (
+        target_pbi_type == "slicer"
+        or "slicer" in qlik_type.lower()
+        or "filter" in qlik_type.lower()
+    )
+
     raw_dims_input = (
         _names(source.get("dimensions"))
         + _names(source.get("x_axis"))
@@ -276,8 +289,10 @@ def build_visual(
         + _names(visual.get("columns"))
         + _names(source.get("columns"))
         + _names(pbi_dict.get("columns"))
-        + _names(visual.get("slicers"))
     )
+    if is_slicer_visual:
+        raw_dims_input.extend(_names(visual.get("slicers")) + _names(source.get("slicers")))
+
     if combo_cat and combo_cat not in raw_dims_input:
         raw_dims_input.insert(0, combo_cat)
 

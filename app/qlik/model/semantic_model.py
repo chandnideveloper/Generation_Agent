@@ -108,7 +108,7 @@ def build_semantic_model(
             valid_columns.add(("Parameters", pcol))
 
     for table in tables:
-        raw_name = text(table.get("name") or table.get("table_name"))
+        raw_name = text(table.get("bi_table_name") or table.get("name") or table.get("table_name"))
         name = _clean_table_name(raw_name)
         if name not in table_files:
             continue

@@ -1004,7 +1004,7 @@ def build_tables(tables: List[Dict[str, Any]]) -> Dict[str, str]:
     for table in tables:
         if not isinstance(table, dict):
             continue
-        raw_name = text(table.get("name") or table.get("table_name"), "Table")
+        raw_name = text(table.get("bi_table_name") or table.get("name") or table.get("table_name"), "Table")
         clean_name = _clean_table_name(raw_name)
         cols = as_list(table.get("columns")) or as_list(table.get("fields"))
 
@@ -1013,7 +1013,7 @@ def build_tables(tables: List[Dict[str, Any]]) -> Dict[str, str]:
 
         if clean_name in seen_clean_names:
             existing = seen_clean_names[clean_name]
-            existing_raw = text(existing.get("name") or existing.get("table_name"))
+            existing_raw = text(existing.get("bi_table_name") or existing.get("name") or existing.get("table_name"))
             existing_cols = as_list(existing.get("columns")) or as_list(existing.get("fields"))
             if raw_name == clean_name and existing_raw != clean_name:
                 seen_clean_names[clean_name] = table
