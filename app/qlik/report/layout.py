@@ -77,16 +77,89 @@ def to_canvas(
     fabric = as_dict(visual.get("fabric"))
     layout = as_dict(visual.get("layout")) or as_dict(fabric.get("layout"))
     position = as_dict(visual.get("position")) or as_dict(visual.get("qlik_source"))
+    target = as_dict(position.get("target"))
+    source_grid = as_dict(position.get("source"))
+    grid_coords = as_dict(layout.get("grid_coordinates"))
+    px720 = as_dict(layout.get("pixel_bounds_720p"))
     power_bi_gen = as_dict(fabric.get("power_bi_visual_type")).get("general")
 
     effective_height = canvas_height or config.CANVAS_HEIGHT
     columns, rows = grid
 
-    # 1. First priority: True grid coordinates (col, row, colspan, rowspan)
-    col_val = layout.get("col", position.get("col", None))
-    row_val = layout.get("row", position.get("row", None))
-    colspan_val = layout.get("colspan", position.get("colspan", None))
-    rowspan_val = layout.get("rowspan", position.get("rowspan", None))
+    # 1. First priority: Pre-computed target pixels from mapping or 720p pixel bounds
+    for px_source in (target, px720):
+        if not isinstance(px_source, dict):
+            continue
+        x_val = px_source.get("x", px_source.get("left"))
+        y_val = px_source.get("y", px_source.get("top"))
+        w_val = px_source.get("width", px_source.get("w"))
+        h_val = px_source.get("height", px_source.get("h"))
+        if x_val is not None and y_val is not None and w_val and h_val:
+            src_x = int(round(_number(x_val, 0)))
+            src_y = int(round(_number(y_val, 0)))
+            src_w = max(int(round(_number(w_val, 320))), MIN_SIZE)
+            src_h = max(int(round(_number(h_val, 240))), MIN_SIZE)
+            return _clamp(
+                src_x,
+                src_y,
+                src_w,
+                src_h,
+                canvas_height=effective_height,
+            )
+
+    # 2. Second priority: True grid coordinates (col, row, colspan, rowspan)
+    col_val = (
+        layout.get("col")
+        if layout.get("col") is not None
+        else (
+            visual.get("col")
+            if visual.get("col") is not None
+            else (
+                grid_coords.get("col")
+                if grid_coords.get("col") is not None
+                else (source_grid.get("col") if source_grid.get("col") is not None else position.get("col"))
+            )
+        )
+    )
+    row_val = (
+        layout.get("row")
+        if layout.get("row") is not None
+        else (
+            visual.get("row")
+            if visual.get("row") is not None
+            else (
+                grid_coords.get("row")
+                if grid_coords.get("row") is not None
+                else (source_grid.get("row") if source_grid.get("row") is not None else position.get("row"))
+            )
+        )
+    )
+    colspan_val = (
+        layout.get("colspan")
+        if layout.get("colspan") is not None
+        else (
+            visual.get("colspan")
+            if visual.get("colspan") is not None
+            else (
+                grid_coords.get("colspan")
+                if grid_coords.get("colspan") is not None
+                else (source_grid.get("colspan") if source_grid.get("colspan") is not None else position.get("colspan"))
+            )
+        )
+    )
+    rowspan_val = (
+        layout.get("rowspan")
+        if layout.get("rowspan") is not None
+        else (
+            visual.get("rowspan")
+            if visual.get("rowspan") is not None
+            else (
+                grid_coords.get("rowspan")
+                if grid_coords.get("rowspan") is not None
+                else (source_grid.get("rowspan") if source_grid.get("rowspan") is not None else position.get("rowspan"))
+            )
+        )
+    )
 
     if col_val is not None and row_val is not None and colspan_val is not None and rowspan_val is not None:
         col = _number(col_val, 0)
@@ -96,8 +169,8 @@ def to_canvas(
 
         scale_x = config.CANVAS_WIDTH / float(columns)
         # In Qlik Sense, row unit height is 60px (720 / 12 = 60). For scrolling sheets (>12 rows),
-        # each row is 60px; for standard 12-row sheets, row_height is effective_height / 12 = 60px.
-        row_height = float(effective_height) / float(rows) if (rows <= 12 and rows > 0) else 60.0
+        # each row is 60px; for standard 12-row sheets, row_height is 60.0px.
+        row_height = 60.0
 
         computed_x = int(round(col * scale_x))
         computed_y = int(round(row * row_height))
@@ -112,7 +185,7 @@ def to_canvas(
             canvas_height=effective_height,
         )
 
-    # 2. Second priority: Pre-computed pixels if within reasonable canvas bounds
+    # 3. Third priority: Pre-computed pixels if within reasonable canvas bounds
     for source in (layout, position, power_bi_gen):
         if not isinstance(source, dict):
             continue
@@ -133,11 +206,11 @@ def to_canvas(
                     canvas_height=effective_height,
                 )
 
-    # 3. Fallback tiling for unpositioned visuals
+    # 4. Fallback tiling for unpositioned visuals
     col = (index % 2) * (columns / 2)
     row = (index // 2) * (rows / 3)
     scale_x = config.CANVAS_WIDTH / columns
-    row_height = (effective_height / rows) if rows > 0 else (effective_height / 12.0)
+    row_height = 60.0
 
     return _clamp(
         int(col * scale_x),
@@ -146,7 +219,6 @@ def to_canvas(
         int((rows / 3) * row_height),
         canvas_height=effective_height,
     )
-
 
 
 def _clamp(
@@ -219,13 +291,28 @@ def compute_sheet_layout(
     def has_coords(v: Dict[str, Any]) -> bool:
         lay = as_dict(v.get("layout")) or as_dict(as_dict(v.get("fabric")).get("layout"))
         pos = as_dict(v.get("position"))
+        tgt = as_dict(pos.get("target"))
+        src = as_dict(pos.get("source"))
+        grid_coords = as_dict(lay.get("grid_coordinates"))
+        px720 = as_dict(lay.get("pixel_bounds_720p"))
+
+        if (tgt.get("x") is not None or tgt.get("left") is not None) and (tgt.get("width") or tgt.get("w")):
+            return True
+        if (px720.get("left") is not None or px720.get("x") is not None) and px720.get("width"):
+            return True
         if lay.get("col") is not None and lay.get("row") is not None:
+            return True
+        if src.get("col") is not None and src.get("row") is not None:
+            return True
+        if grid_coords.get("col") is not None and grid_coords.get("row") is not None:
             return True
         if pos.get("col") is not None and pos.get("row") is not None:
             return True
         if lay.get("x") is not None and lay.get("y") is not None:
             return True
         if pos.get("x") is not None and pos.get("y") is not None:
+            return True
+        if v.get("col") is not None and v.get("row") is not None:
             return True
         return False
 
@@ -237,7 +324,8 @@ def compute_sheet_layout(
         base_h = max(config.CANVAS_HEIGHT, int(round(rows * 60.0))) if rows > 12 else config.CANVAS_HEIGHT
         prelim = [to_canvas(v, grid, i, canvas_height=base_h) for i, v in enumerate(sheet_visuals)]
         max_bottom = max((p["y"] + p["height"] for p in prelim), default=base_h)
-        actual_h = max(base_h, max_bottom + 40)
+        # Avoid artificial +40px inflation that distorts row height scaling
+        actual_h = max(base_h, max_bottom)
         final_rects = [to_canvas(v, grid, i, canvas_height=actual_h) for i, v in enumerate(sheet_visuals)]
         return final_rects, actual_h
 
@@ -293,8 +381,19 @@ def compute_sheet_layout(
         for i, ch in enumerate(charts):
             r = i // 2
             c = i % 2
-            is_lone_last = (i == num_charts - 1 and c == 0)
-            actual_w = content_w if is_lone_last else ch_w
+            # Check for explicit width or colspan before assuming full width
+            ch_lay = as_dict(ch.get("layout"))
+            ch_pos = as_dict(ch.get("position"))
+            ch_tgt = as_dict(ch_pos.get("target"))
+            explicit_w = ch_tgt.get("width") or ch_lay.get("width")
+            if explicit_w and _number(explicit_w, 0) > 0:
+                actual_w = min(int(round(_number(explicit_w))), content_w)
+            elif ch_lay.get("colspan"):
+                scale_x = config.CANVAS_WIDTH / float(grid[0])
+                actual_w = min(int(round(_number(ch_lay["colspan"]) * scale_x)), content_w)
+            else:
+                is_lone_last = (i == num_charts - 1 and c == 0)
+                actual_w = content_w if is_lone_last else ch_w
             x = margin if c == 0 else (margin + ch_w + gap)
             y = cur_y + r * (ch_h + gap)
             positions[id(ch)] = {"x": int(x), "y": int(y), "width": int(actual_w), "height": int(ch_h)}
